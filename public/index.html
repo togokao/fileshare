@@ -48,13 +48,34 @@
   }
   button:disabled { opacity: .5; cursor: default; }
   .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  #login form { display: flex; gap: 10px; }
+  #login input {
+    flex: 1; min-width: 0; font: inherit; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
-  <h1>FileShare</h1>
+  <div class="top">
+    <h1>FileShare</h1>
+    <button class="ghost" id="logout" hidden>登出</button>
+  </div>
   <p class="sub">上傳檔案，所有人都能看到並下載。檔案被下載一次後就會自動刪除。</p>
 
+  <section class="card" id="login" hidden>
+    <h2>請輸入密碼</h2>
+    <form id="loginForm">
+      <input type="password" id="password" placeholder="密碼" autocomplete="current-password" required>
+      <button type="submit">登入</button>
+    </form>
+    <div class="msg" id="loginMsg"></div>
+  </section>
+
+  <div id="app" hidden>
   <section class="card">
     <div class="drop" id="drop">
       <div><strong>點擊選擇檔案</strong> 或拖曳檔案到這裡</div>
@@ -69,6 +90,7 @@
     <h2>可下載的檔案 <small id="count"></small></h2>
     <ul id="list"><li class="empty">載入中…</li></ul>
   </section>
+  </div>
 </main>
 
 <script>
@@ -90,9 +112,43 @@ function setMsg(text, isErr) {
   msg.className = 'msg' + (isErr ? ' err' : '');
 }
 
+function showLogin(show) {
+  $('login').hidden = !show;
+  $('app').hidden = show;
+  $('logout').hidden = show;
+  if (show) $('password').focus();
+}
+
+$('loginForm').onsubmit = async e => {
+  e.preventDefault();
+  const r = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: $('password').value }),
+  });
+  if (r.ok) {
+    $('password').value = '';
+    $('loginMsg').textContent = '';
+    showLogin(false);
+    refresh();
+  } else {
+    const err = (await r.json().catch(() => ({}))).error || '登入失敗';
+    $('loginMsg').textContent = err;
+    $('loginMsg').className = 'msg err';
+  }
+};
+
+$('logout').onclick = async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  showLogin(true);
+};
+
 async function refresh() {
   try {
-    const files = await (await fetch('/api/files')).json();
+    const res = await fetch('/api/files');
+    if (res.status === 401) return showLogin(true);
+    showLogin(false);
+    const files = await res.json();
     $('count').textContent = files.length ? `共 ${files.length} 個` : '';
     list.replaceChildren();
     if (!files.length) {
@@ -137,6 +193,7 @@ function uploadOne(file) {
     };
     xhr.onload = () => {
       if (xhr.status === 201) return resolve();
+      if (xhr.status === 401) showLogin(true);
       let err = '上傳失敗';
       try { err = JSON.parse(xhr.responseText).error || err; } catch {}
       reject(new Error(err));
@@ -170,7 +227,7 @@ drop.ondragleave = () => drop.classList.remove('over');
 drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); uploadAll(e.dataTransfer.files); };
 
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => { if ($('login').hidden) refresh(); }, 5000);
 </script>
 </body>
 </html>

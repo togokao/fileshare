@@ -8,6 +8,17 @@ const PORT = Number(process.env.PORT) || 3000;
 const MAX_SIZE = Number(process.env.MAX_SIZE_MB || 100) * 1024 * 1024;
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, 'uploads'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const SESSION_HOURS = Number(process.env.SESSION_HOURS) || 24 * 7;
+
+let PASSWORD = process.env.PASSWORD;
+if (!PASSWORD) {
+  PASSWORD = crypto.randomBytes(6).toString('base64url');
+  console.log(`PASSWORD not set, using generated password: ${PASSWORD}`);
+}
+// Sessions are signed with a key derived from the password,
+// so changing the password signs everyone out.
+const SESSION_KEY = crypto.createHash('sha256').update('fileshare:' + PASSWORD).digest();
+const COOKIE = 'fs_session';
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -34,6 +45,69 @@ function removeFiles(id) {
 function sendJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
+}
+
+function sign(value) {
+  return crypto.createHmac('sha256', SESSION_KEY).update(value).digest('base64url');
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function isLoggedIn(req) {
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => {
+    const i = c.indexOf('=');
+    return [c.slice(0, i).trim(), c.slice(i + 1).trim()];
+  }));
+  const [expires, sig] = (cookies[COOKIE] || '').split('.');
+  if (!expires || !sig || Number(expires) < Date.now()) return false;
+  return safeEqual(sig, sign(expires));
+}
+
+// Per-IP limit on wrong passwords: ip -> { count, resetAt }
+const failures = new Map();
+const MAX_FAILURES = 10;
+const LOCK_MS = 15 * 60 * 1000;
+
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk;
+      if (data.length > limit) { reject(new Error('too large')); req.destroy(); }
+    });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+async function login(req, res) {
+  const ip = req.socket.remoteAddress;
+  const f = failures.get(ip);
+  if (f && f.resetAt < Date.now()) failures.delete(ip);
+  else if (f && f.count >= MAX_FAILURES) return sendJson(res, 429, { error: '嘗試次數過多，請稍後再試' });
+
+  let password = '';
+  try { password = String(JSON.parse(await readBody(req, 4096)).password || ''); } catch {}
+
+  if (!safeEqual(password, PASSWORD)) {
+    const cur = failures.get(ip) || { count: 0, resetAt: Date.now() + LOCK_MS };
+    cur.count++;
+    failures.set(ip, cur);
+    return sendJson(res, 401, { error: '密碼錯誤' });
+  }
+  failures.delete(ip);
+  const expires = String(Date.now() + SESSION_HOURS * 3600 * 1000);
+  res.setHeader('Set-Cookie', `${COOKIE}=${expires}.${sign(expires)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_HOURS * 3600}`);
+  sendJson(res, 200, { ok: true });
+}
+
+function logout(res) {
+  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+  sendJson(res, 200, { ok: true });
 }
 
 function listFiles(res) {
@@ -124,6 +198,12 @@ function serveStatic(res, urlPath) {
 
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
+  if (req.method === 'POST' && pathname === '/api/login') return login(req, res);
+  if (req.method === 'POST' && pathname === '/api/logout') return logout(res);
+  if (pathname.startsWith('/api/') && !isLoggedIn(req)) {
+    req.resume();
+    return sendJson(res, 401, { error: '請先登入' });
+  }
   if (req.method === 'GET' && pathname === '/api/files') return listFiles(res);
   if (req.method === 'POST' && pathname === '/api/upload') return upload(req, res);
   const m = pathname.match(/^\/api\/download\/([a-f0-9]{32})$/);
