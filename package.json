@@ -1,0 +1,10 @@
+{
+  "name": "fileshare",
+  "version": "1.0.0",
+  "description": "Simple file sharing: upload, list, one-time download",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT"
+}
