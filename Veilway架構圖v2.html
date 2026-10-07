@@ -49,6 +49,7 @@ figcaption b{color:var(--ink);font-weight:500}
 .box.alt{stroke-dasharray:6 5}
 .box.stop{fill:var(--stop-soft);stroke:var(--stop)}
 .box.group{fill:none;stroke:var(--line)}
+.box.group.veilgrp{stroke:var(--veil);stroke-dasharray:6 5}
 .region{fill:var(--region);stroke:none}
 .t{fill:var(--ink);font-family:var(--f-body);font-size:15px;font-weight:700}
 .s{fill:var(--muted);font-family:var(--f-body);font-size:12.5px}
@@ -111,15 +112,15 @@ code{font-family:var(--f-mono);font-size:.9em}
     <p class="eyebrow">多租戶 AI 應用平台 · 架構圖 v2</p>
     <h1>隱道<span>Veilway</span></h1>
     <p class="lede">所有 AI 請求都走同一條道：送出前在平台內把個資換成代號，回覆回來後再換回真名。外部模型從頭到尾只看得到代號。</p>
-    <p class="ver">v2（2026-10-07）：出口改走 PrivateLink、補上推論位置的查證結果、檢查點處理規則，以及特殊合規租戶的建議。</p>
+    <p class="ver">v2（2026-10-07）：出口改走 PrivateLink、補上推論位置的查證結果、檢查點處理規則，以及特殊合規租戶的建議；隱道閘道改為獨立的 ECS service。</p>
   </header>
 
   <section>
     <h2>全景：隱道在系統中的位置</h2>
-    <p>前台、業務 API、資料庫都是標準配置。整套架構跟一般 SaaS 不同的地方，在於後端唯一能連到平台外模型的出口，就是隱道閘道。</p>
+    <p>前台、業務 API、資料庫都是標準配置。整套架構跟一般 SaaS 不同的地方，在於後端唯一能連到平台外模型的出口，就是隱道閘道；它是獨立的 service，有自己的 security group 與 IAM role。</p>
     <figure>
       <div class="scroll">
-        <svg viewBox="0 0 1000 540" role="img" aria-label="系統全景：iPad 經 CloudFront 進入，靜態前台在 S3，API 經 ALB 到 Fargate 上的 ASP.NET Core 後端；後端讀寫 RDS、ElastiCache、S3 與 SQS。只有隱道閘道會跨越平台邊界，經 PrivateLink 連到 Claude Platform on AWS，或經連接器連到租戶地端 LLM，而且只送代號。">
+        <svg viewBox="0 0 1000 540" role="img" aria-label="系統全景：iPad 經 CloudFront 進入，靜態前台在 S3，API 經 ALB 到 Fargate 上的 ASP.NET Core 後端；後端分成 API service 與獨立的閘道 service，API 經 Service Connect 呼叫閘道；後端讀寫 RDS、ElastiCache、S3 與 SQS。只有隱道閘道會跨越平台邊界，經 PrivateLink 連到 Claude Platform on AWS，或經連接器連到租戶地端 LLM，而且只送代號。">
           <defs>
             <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker>
             <marker id="a1v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahv" d="M0 0L10 5L0 10z"/></marker>
@@ -150,22 +151,30 @@ code{font-family:var(--f-mono);font-size:.9em}
           <text class="t" x="545" y="219" text-anchor="middle">ALB</text>
           <text class="s" x="545" y="237" text-anchor="middle">只負責分流</text>
 
-          <line class="ln" x1="545" y1="246" x2="545" y2="280" marker-end="url(#a1)"/>
+          <line class="ln" x1="490" y1="246" x2="490" y2="280" marker-end="url(#a1)"/>
 
-          <rect class="box group" x="40" y="284" width="685" height="126" rx="12"/>
-          <text class="rl" x="58" y="308">ASP.NET Core 後端 · ECS Fargate（至少 2 個容器）</text>
-          <rect class="box" x="58" y="322" width="150" height="70" rx="9"/>
-          <text class="t" x="133" y="352" text-anchor="middle">業務 API</text>
-          <text class="s" x="133" y="372" text-anchor="middle">C# Controller</text>
-          <rect class="box" x="223" y="322" width="150" height="70" rx="9"/>
-          <text class="t" x="298" y="352" text-anchor="middle">租戶管理</text>
-          <text class="s" x="298" y="372" text-anchor="middle">方案 · 額度 · 計量</text>
-          <rect class="box" x="388" y="322" width="150" height="70" rx="9"/>
-          <text class="t" x="463" y="352" text-anchor="middle">媒體上傳</text>
-          <text class="s" x="463" y="372" text-anchor="middle">簽發 S3 直傳網址</text>
-          <rect class="box veil" x="553" y="322" width="155" height="70" rx="9"/>
-          <text class="t" x="630" y="352" text-anchor="middle">隱道閘道</text>
-          <text class="s" x="630" y="372" text-anchor="middle">遮蔽 · 檢查 · 還原</text>
+          <rect class="box group" x="40" y="284" width="490" height="126" rx="12"/>
+          <text class="rl" x="56" y="308">API service · ECS Fargate（至少 2 個容器）</text>
+          <rect class="box" x="54" y="322" width="148" height="70" rx="9"/>
+          <text class="t" x="128" y="352" text-anchor="middle">業務 API</text>
+          <text class="s" x="128" y="372" text-anchor="middle">C# Controller</text>
+          <rect class="box" x="214" y="322" width="148" height="70" rx="9"/>
+          <text class="t" x="288" y="352" text-anchor="middle">租戶管理</text>
+          <text class="s" x="288" y="372" text-anchor="middle">方案 · 額度 · 計量</text>
+          <rect class="box" x="374" y="322" width="142" height="70" rx="9"/>
+          <text class="t" x="445" y="352" text-anchor="middle">媒體上傳</text>
+          <text class="s" x="445" y="372" text-anchor="middle">簽發 S3 直傳網址</text>
+
+          <rect class="box group veilgrp" x="556" y="284" width="169" height="126" rx="12"/>
+          <text class="rl" x="570" y="308">閘道 service</text>
+          <rect class="box veil" x="570" y="322" width="141" height="70" rx="9"/>
+          <text class="t" x="640" y="352" text-anchor="middle">隱道閘道</text>
+          <text class="s" x="640" y="372" text-anchor="middle">遮蔽 · 檢查 · 還原</text>
+          <text class="s" x="640" y="404" text-anchor="middle">獨立 SG 與 IAM role</text>
+
+          <line class="ln" x1="516" y1="357" x2="566" y2="357" marker-end="url(#a1)"/>
+          <text class="lab" x="550" y="276">Service Connect</text>
+          <line class="ln d" x1="543" y1="280" x2="543" y2="350"/>
 
           <rect class="box" x="780" y="296" width="190" height="72" rx="10"/>
           <text class="t" x="875" y="320" text-anchor="middle">Claude Platform</text>
@@ -175,13 +184,14 @@ code{font-family:var(--f-mono);font-size:.9em}
           <text class="t" x="875" y="416" text-anchor="middle">租戶地端 LLM</text>
           <text class="s" x="875" y="435" text-anchor="middle">Ollama · vLLM</text>
 
-          <path class="ln v" d="M708 350 C740 350 744 332 776 332" marker-end="url(#a1v)"/>
-          <path class="ln v d" d="M708 364 C740 364 744 420 776 420" marker-end="url(#a1v)"/>
+          <path class="ln v" d="M711 350 C740 350 744 332 776 332" marker-end="url(#a1v)"/>
+          <path class="ln v d" d="M711 364 C740 364 744 420 776 420" marker-end="url(#a1v)"/>
           <text class="lab v" x="782" y="276">只送代號</text>
           <text class="lab v" x="782" y="290">經 PrivateLink</text>
           <text class="lab v" x="782" y="466">經隱道連接器</text>
 
           <line class="ln" x1="380" y1="410" x2="380" y2="444"/>
+          <line class="ln" x1="610" y1="410" x2="610" y2="444"/>
           <line class="ln" x1="130" y1="444" x2="645" y2="444"/>
           <text class="lab" x="390" y="436">讀寫 · 依 TENANT_ID 強制隔離（RLS）</text>
           <line class="ln" x1="130" y1="444" x2="130" y2="462" marker-end="url(#a1)"/>
@@ -203,7 +213,7 @@ code{font-family:var(--f-mono);font-size:.9em}
           <text class="s" x="645" y="509" text-anchor="middle">長任務 · 影音處理</text>
         </svg>
       </div>
-      <figcaption><b>琥珀色是唯一跨出平台的路徑。</b>平台元件都在台北區域內；登入（Cognito）、金鑰（Secrets Manager／KMS）、監控（CloudWatch）屬於橫向服務，圖中省略。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2。線上模型由原文件的 Amazon Bedrock 改為 Claude Platform on AWS：同樣走 AWS IAM 與帳單，但功能與 Anthropic 自家 API 同步。閘道經 <b>PrivateLink</b> 連線，不經過公網。注意：<b>模型推論在 Anthropic 的資料中心進行（global 或 us），不在台北</b>；跨出平台的只有代號化後的內容（見「出口與推論位置」）。</figcaption>
+      <figcaption><b>琥珀色是唯一跨出平台的路徑。</b>平台元件都在台北區域內；登入（Cognito）、金鑰（Secrets Manager／KMS）、監控（CloudWatch）屬於橫向服務，圖中省略。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2。線上模型由原文件的 Amazon Bedrock 改為 Claude Platform on AWS：同樣走 AWS IAM 與帳單，但功能與 Anthropic 自家 API 同步。<b>隱道閘道是獨立的 ECS service</b>，有自己的 security group 與 IAM role；業務 API 經 Service Connect 呼叫它，本身沒有呼叫模型的權限。閘道經 <b>PrivateLink</b> 連線，不經過公網，endpoint 只允許閘道連入；其他對外連線走 egress proxy／Network Firewall，allowlist 不放行任何 AI 服務。注意：<b>模型推論在 Anthropic 的資料中心進行（global 或 us），不在台北</b>；跨出平台的只有代號化後的內容（見「出口與推論位置」）。</figcaption>
     </figure>
   </section>
 
@@ -290,7 +300,7 @@ code{font-family:var(--f-mono);font-size:.9em}
       <table class="comp">
         <thead><tr><th>位置</th><th>中文名</th><th>英文名</th><th>做法</th></tr></thead>
         <tbody>
-          <tr><td>後端內的 AI Gateway</td><td>隱道閘道</td><td>Veilway Gateway</td><td>統一介面（IChatClient），遮蔽、檢查、還原、計量各為一層 DelegatingChatClient；唯一能連到平台外模型的出口</td></tr>
+          <tr><td>獨立的 ECS service</td><td>隱道閘道</td><td>Veilway Gateway</td><td>統一介面（IChatClient），遮蔽、檢查、還原、計量各為一層 DelegatingChatClient；唯一能連到平台外模型的出口，有自己的 security group 與 IAM role</td></tr>
           <tr><td>去程第一步</td><td>遮蔽器</td><td>Veil Masker</td><td>三層：① 正規表示式（身分證、電話、Email、卡號、統編）② 租戶字典（客戶名單、員工名冊）③ CPU 可跑的繁中 NER（人名、地址、公司名）；另做別名展開：王小明 → 小明、王先生</td></tr>
           <tr><td>平台資料庫</td><td>對照表</td><td>Veil Map</td><td>真名與代號的對應，只存在平台內（RDS，以租戶的 KMS key 加密）。預設每個對話一張並設 TTL；RAG 才用租戶範圍；絕不跨租戶</td></tr>
           <tr><td>跨越邊界前</td><td>檢查點</td><td>Veil Check</td><td>送出前比對對照表原值、重跑正規表示式、比對租戶字典；處理規則見下一節</td></tr>
@@ -360,7 +370,7 @@ code{font-family:var(--f-mono);font-size:.9em}
         <thead><tr><th>階段</th><th>內容</th><th>完成時能做到</th></tr></thead>
         <tbody>
           <tr><td>1 · 骨架</td><td>VPC、IaC、CI/CD、CloudFront＋WAF、S3 前台、ALB、C# API、Cognito、RDS 基本資料表（含 RLS）</td><td>能登入，前台呼叫 API，依租戶讀寫資料</td></tr>
-          <tr><td>2 · 隱道</td><td>隱道閘道、Claude Platform on AWS（PrivateLink）、對照表／對話／稽核／計量存 RDS、Ollama 開發用</td><td>能多輪對話，外部只看得到代號</td></tr>
+          <tr><td>2 · 隱道</td><td>隱道閘道（獨立 service）、Claude Platform on AWS（PrivateLink）、出口管控（egress proxy）、對照表／對話／稽核／計量存 RDS、Ollama 開發用</td><td>能多輪對話，外部只看得到代號</td></tr>
           <tr><td>3 · 檔案與非同步</td><td>S3 上傳、SQS＋Worker、文件解析與遮蔽、影音處理；可選：RAG、Batch、租戶地端連接器</td><td>上傳文件請 AI 分析，耗時工作不卡住 API</td></tr>
         </tbody>
       </table>
