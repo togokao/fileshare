@@ -83,9 +83,10 @@
    - 刪除 root 的存取金鑰（如果有）。之後**不再用 root 做日常操作**。
 2. **建立組織與環境帳號**（詳細步驟見下方「1.2 建立組織與環境帳號」）
    - **AWS Organizations** → **Create an organization** → 新增帳號：`veilway-sandbox`、`veilway-dev`、`veilway-staging`、`veilway-prod`。
-3. **人員登入改用 IAM Identity Center**
+3. **人員登入改用 IAM Identity Center**（詳細步驟見下方「1.3 人員登入改用 IAM Identity Center」）
    - **IAM Identity Center** → **Enable** → 建立使用者與群組 → 指派權限集（例如開發者在 sandbox、dev 有 `PowerUserAccess`，在 prod 只有唯讀）。
    - 每位成員都要設定 MFA。
+   - ⚠️ Identity Center 要建在台北時，管理帳號必須**先**完成第 4 項「啟用台北區域」。
 4. **啟用台北區域** ⚠️
    - 台北是「需要手動開啟」的區域（opt-in region），預設是關閉的。
    - 主控台右上角帳號名稱 → **Account** → **AWS Regions** → 找到 **Asia Pacific (Taipei)** → **Enable**。
@@ -164,12 +165,167 @@
 
 這樣成員帳號的 root 就無法登入。真的需要 root 操作時，再從管理帳號臨時取得權限。
 
+### 1.3 人員登入改用 IAM Identity Center
+
+**目的**：建立每個人日常使用的登入帳號。一次登入就能切換到各環境帳號，權限依群組統一管理。做完之後就不用再登入 root。
+
+以下都在**管理帳號**操作。
+
+#### 名詞對照
+
+| 名詞 | 白話說明 |
+| --- | --- |
+| 使用者 | 一個人的登入帳號（名稱、email、密碼、MFA） |
+| 群組 | 一群權限相同的人，例如管理者、開發人員。權限指派給群組，不直接給個人 |
+| 許可集（權限集） | 一組權限範本，例如「完整管理」「唯讀」。主控台顯示為「許可集」 |
+| 指派 | 「哪個群組」在「哪個帳號」有「哪個許可集」 |
+| AWS 存取入口網站 | 大家登入的網頁，登入後列出自己能進的帳號和權限 |
+
+#### A. 區域與執行個體組態 ⚠️
+
+Identity Center 只能有一個**主要區域**，建立後**不能更改**，要換只能整個刪除重建。
+
+1. 管理帳號先完成第 4 項「啟用台北區域」，等狀態變成「已啟用」。
+2. 主控台搜尋 **IAM Identity Center**，右上角區域切到 **亞太地區（台北）**。
+   - 如果台北無法啟用 Identity Center，改選**東京**（ap-northeast-1）。這裡只存放人員的登入帳號，不影響系統放在台北。
+3. 按 **啟用**。啟用頁面會以 AWS Organizations 建立**組織執行個體**，這是正確的，可以管理組織內所有帳號。
+4. **執行個體組態**：選 **單一區域執行個體**（預設是「多區域」）。
+
+| | 多區域（預設） | **單一區域（建議）** |
+| --- | --- | --- |
+| 資料放在哪裡 | 台北，並**複製到美國西部（奧勒岡）** | 只在台北 |
+| 加密金鑰 | 必須用客戶自管的 KMS 金鑰，要自己管理金鑰政策 | AWS 擁有的金鑰，不用設定 |
+| 好處 | 台北的 Identity Center 故障時，可以從美國登入 | 設定最簡單 |
+| 對 Veilway 的影響 | 人員的帳號資料（姓名、email）會出境 | 跟「平台在台灣」的說法一致 |
+
+   台北的 Identity Center 真的故障時，還有 root 可以緊急登入；之後需要備援時，也可以再新增區域。
+
+5. 確認下方設定表格後按 **啟用**：
+
+| 設定 | 值 | 之後能否變更 |
+| --- | --- | --- |
+| 靜態加密 | AWS 擁有的金鑰 | 可以 |
+| 許可集 | 已啟用 | 不可以（必須啟用） |
+| 主要區域 | 亞太區域（台北） | **不可以** |
+| 其他區域 | 無 | 可以 |
+
+身分來源保留預設的 **Identity Center 目錄**（使用者和密碼由 Identity Center 自己管理）。
+
+#### B. 設定 MFA
+
+**設定**（Settings）→ **身分驗證**（Authentication）分頁 → **多重要素驗證** → **設定**：
+
+| 項目 | 選擇 | 理由 |
+| --- | --- | --- |
+| 提示使用者進行 MFA | **每次登入時（永遠開啟）** | 另一個選項只在換裝置、換地點時才要求，保護較弱 |
+| 使用者可以使用的 MFA 類型 | **安全金鑰和內建驗證器**、**驗證器應用程式** 都勾選 | passkey、指紋、實體金鑰、Google Authenticator 都能用 |
+| 如果使用者尚未註冊 MFA 裝置 | **要求他們在登入時註冊 MFA 裝置** | 新人第一次登入就得設定，不會有人漏掉 |
+| 誰可以管理 MFA 裝置 | 勾選 **使用者可以新增和管理自己的 MFA 裝置** | 換手機或新增備用裝置時不用找管理者 |
+
+按 **儲存變更**。同一頁的工作階段持續時間（預設 8 小時）保持不變。
+
+#### C. 自訂登入網址
+
+**設定** → **身分來源**（Identity source）分頁會顯示兩個 **AWS access portal URL**：
+
+| 網址 | 說明 |
+| --- | --- |
+| 雙堆疊 `https://ssoins-…portal.ap-east-2.app.aws` | 新式網址，支援 IPv6，**不能自訂** |
+| 僅限 IPv4 `https://d-xxxxxxxxxx.awsapps.com/start` | 可以把 `d-xxxxxxxxxx` 換成好記的名稱 |
+
+**動作** → **自訂 AWS 存取入口網站 URL** → 輸入名稱（例如 `veilway`）→ **儲存**，網址就會變成 `https://veilway.awsapps.com/start`。
+
+- ⚠️ 自訂網址**只能設定一次**，之後無法再改。
+- 名稱在全 AWS 必須唯一，被用走時換一個（例如 `veilway-tw`）。
+- 自訂後，原本的 `d-xxxxxxxxxx.awsapps.com` 會失效。
+- 這個網址就是之後每個人的登入入口，請加入書籤，並告知團隊成員。
+
+#### D. 建立群組
+
+**群組** → **建立群組**，建立兩個（成員先不用選）：
+
+| 群組名稱 | 描述 | 給誰 |
+| --- | --- | --- |
+| `veilway-admins` | Veilway 平台管理者 | 平台管理者 |
+| `veilway-developers` | Veilway 開發人員 | 之後加入的開發人員 |
+
+#### E. 建立使用者
+
+**使用者** → **新增使用者**：
+
+| 欄位 | 填什麼 |
+| --- | --- |
+| 使用者名稱 | 例如 `jeffkao`，登入時使用，**建立後不能改** |
+| 密碼 | **傳送電子郵件給此使用者，並提供密碼設定說明** |
+| 電子郵件地址 | 本人實際收信的信箱 |
+| 名字、姓氏 | 必填 |
+| 其他欄位 | 可以留空 |
+
+**下一步** → 勾選要加入的群組（平台管理者加入 `veilway-admins`）→ **下一步** → **新增使用者**。
+
+- 使用者會收到邀請信「Invitation to join AWS IAM Identity Center」。建議等 F、G 做完再接受邀請，一登入就能看到所有帳號。
+- 邀請連結 **7 天內有效**，過期可以在使用者頁面按 **重設密碼** 重寄。
+
+#### F. 建立許可集
+
+**多帳戶許可** → **許可集** → **建立許可集** → **預先定義的許可集** → 選政策 → **下一步** → 填詳細資訊 → **建立**。建立三個：
+
+| 許可集 | 描述（只能用英文） | 工作階段持續時間 | 用途 |
+| --- | --- | --- | --- |
+| `AdministratorAccess` | `Full admin access` | 4 小時 | 管理者 |
+| `PowerUserAccess` | `Developer access without IAM` | 8 小時 | 開發人員在 sandbox、dev 使用 |
+| `ReadOnlyAccess` | `Read-only access` | 8 小時 | 開發人員在 staging、prod 只能查看 |
+
+- ⚠️ 許可集的**描述只接受英文字母、數字和一般符號**，輸入中文會出現「描述包含無效的字元」。描述也可以留空。
+- **工作階段持續時間**是從入口網站點進某個帳號後多久要重新點一次。管理權限設短一點，忘了登出時風險比較小。
+- **PowerUserAccess** 幾乎可以操作所有服務，但**不能建立或修改 IAM 角色和使用者**。之後 CDK 的 `cdk bootstrap` 需要建立 IAM 角色，要由管理者用 AdministratorAccess 執行一次；之後開發人員用 PowerUserAccess 執行 `cdk deploy` 即可。
+
+#### G. 指派群組與許可集到各帳號
+
+**多帳戶許可** → **AWS 帳戶** → 勾選帳號 → **指派使用者或群組** → **群組** 分頁選群組 → **下一步** → 選許可集 → **下一步** → **提交**。一次可以勾選多個帳號，所以分三輪：
+
+| 輪次 | 勾選的帳號 | 群組 | 許可集 |
+| --- | --- | --- | --- |
+| 1 | 管理帳號、sandbox、dev、staging、prod（全部 5 個） | `veilway-admins` | AdministratorAccess |
+| 2 | sandbox、dev | `veilway-developers` | PowerUserAccess |
+| 3 | staging、prod | `veilway-developers` | ReadOnlyAccess |
+
+完成後的權限對照：
+
+| 帳號 | `veilway-admins` | `veilway-developers` |
+| --- | --- | --- |
+| 管理帳號 | AdministratorAccess | — |
+| veilway-sandbox | AdministratorAccess | PowerUserAccess |
+| veilway-dev | AdministratorAccess | PowerUserAccess |
+| veilway-staging | AdministratorAccess | ReadOnlyAccess |
+| veilway-prod | AdministratorAccess | ReadOnlyAccess |
+
+- 提交後 AWS 會在各帳號建立對應的角色，畫面顯示「正在佈建」，通常一兩分鐘完成。
+- 開發人員群組目前沒有成員也可以先指派，之後新人只要加進群組就自動有權限。
+
+#### H. 第一次登入
+
+1. 打開邀請信 → **Accept invitation** → 設定密碼。
+2. 依畫面**註冊 MFA**。建議用跟 root 不同的裝置或 passkey，其中一個遺失時還有另一個可用。
+3. 登入後，入口網站列出 5 個帳號，每個都有 `AdministratorAccess`。
+4. 點 `veilway-dev` → **AdministratorAccess** → 進入主控台，右上角顯示的應該是 dev 的帳號 ID。
+5. 確認都能登入後，**登出 root**。之後一律從入口網址登入，root 的密碼和 MFA 裝置收好，只在緊急時使用。
+
+#### 新增團隊成員時
+
+1. **使用者** → **新增使用者**，加入對應的群組（通常是 `veilway-developers`）。
+2. 對方收到邀請信 → 設定密碼 → 第一次登入時註冊 MFA。
+3. 不需要再做指派，權限跟著群組走。
+4. 成員離職時，在 **使用者** 頁面**停用**或刪除該使用者，所有帳號的存取立即失效。
+
 ### 驗證
 
 - [ ] root 已設定 MFA，且沒有存取金鑰
 - [ ] Organizations 的帳戶清單裡有管理帳號和 4 個環境帳號，狀態都是「作用中」
 - [ ] 成員帳號已啟用 Root access management
-- [ ] 可以用 Identity Center 帳號登入各環境
+- [ ] Identity Center 的主要區域是台北，執行個體為單一區域
+- [ ] 可以用 Identity Center 帳號從自訂網址登入各環境，登入時會要求 MFA
+- [ ] 入口網站顯示的帳號和權限符合 1.3 G 的對照表
 - [ ] 區域選單看得到「亞太地區（台北）」，並能切換過去
 - [ ] 收到 Budgets 的測試通知
 
