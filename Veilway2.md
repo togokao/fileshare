@@ -26,7 +26,7 @@ flowchart LR
   API --> GW[隱道閘道]
   WK --> GW
   GW --> RDS
-  GW -- 唯一對外 AI 路徑<br/>只送代號 --> EP[Egress Proxy<br/>網域 allowlist] --> CP[Claude Platform on AWS]
+  GW -- 唯一對外 AI 路徑<br/>只送代號 --> PL[PrivateLink<br/>VPC endpoint] --> CP[Claude Platform on AWS]
   GW -- 隱道連接器 --> OL[Ollama / vLLM<br/>租戶機房或開發用]
 ```
 
@@ -43,7 +43,7 @@ flowchart LR
 | AI 出口 | 隱道閘道 | 後端內**唯一**能連到平台外模型的元件 |
 | 橫向服務 | Secrets Manager、KMS、CloudWatch | 金鑰、加密、監控 |
 
-全部元件都在台北區域內。**只有隱道閘道送出、經過遮蔽的內容會跨出平台。**
+**平台元件**全部在台北區域內。模型推論在 Anthropic 的資料中心（美國或全球，見第 7 節），**跨出平台的只有隱道閘道送出、經過遮蔽的內容**。
 
 ---
 
@@ -118,10 +118,10 @@ flowchart LR
 ## 6. 出口管控：「唯一出口」用網路設定強制做到
 
 - 後端放在私有子網，不給一般的對外網路。
-- 閘道連到 **Claude Platform on AWS** 的流量，經過 egress proxy（或 AWS Network Firewall）加網域 allowlist，只放行 `aws-external-anthropic.{region}.api.aws`。其他服務的 security group 不放行這條路徑。
-- **雙重鎖定**：Claude Platform on AWS 用 IAM／SigV4 驗證，呼叫權限只授權給閘道的 IAM role。其他服務就算網路連得到、也裝了 SDK，沒有權限也呼叫不了。
-- **待確認**：Claude Platform on AWS 是否支援 VPC endpoint（PrivateLink）。如果支援，就改走 VPC endpoint，後端子網連 NAT 都不需要。
-- 需要其他對外連線時（例如寄信），同樣走 egress proxy 加網域 allowlist。
+- 閘道透過 **AWS PrivateLink（VPC endpoint）** 連到 Claude Platform on AWS（官方文件已確認支援），流量不經過公網，AI 這條路不需要 NAT 或 egress proxy。
+- **網路鎖定**：VPC endpoint 的 security group 只允許閘道的 security group 連入；endpoint policy 只允許閘道的 IAM role。
+- **權限鎖定**：Claude Platform on AWS 用 IAM／SigV4 驗證，呼叫權限只授權給閘道的 IAM role。其他服務就算裝了 SDK，網路上連不到，也沒有權限。
+- 需要其他對外連線時（例如寄信），走 egress proxy 加網域 allowlist，而且 allowlist **不放行**任何 AI 服務的網域。
 - **日誌也是外洩路徑**：應用程式日誌和例外訊息不能印出原始 prompt，CloudWatch 要定期抽查。
 
 ---
@@ -134,7 +134,10 @@ flowchart LR
 | 驗證 | IAM／SigV4 | IAM／SigV4 | API key |
 | 計費 | AWS Marketplace | AWS 帳單 | Anthropic 帳單 |
 | 功能 | 和第一方 API 同步，含 Batch、Files API、`inference_geo` | 是子集，新功能較晚到；沒有 Batch、Files API 等 | 完整 |
-| 網路 | AWS 端點 `aws-external-anthropic.{region}.api.aws`；出口靠 egress allowlist 加 IAM 鎖定 | VPC endpoint | 經過公網，需要 NAT 和 allowlist |
+| 網路 | PrivateLink（VPC endpoint） | VPC endpoint | 經過公網，需要 NAT 和 allowlist |
+| 推論資料的處理者 | Anthropic | AWS | Anthropic |
+| 推論位置 | 由 `inference_geo` 決定：`global` 或 `us`；不受 AWS 區域影響 | 由區域和 inference profile 決定 | 由 `inference_geo` 決定 |
+| 資料保留 | 同第一方 API；ZDR 需另外申請 | AWS 處理，Anthropic 不保留 | 同第一方 API |
 | 模型 ID | 第一方 ID，不加前綴 | 需加 `anthropic.` 前綴 | 第一方 ID |
 
 **採用理由**：
@@ -149,12 +152,47 @@ flowchart LR
 - C# 使用 `Anthropic.Aws` 套件的 `AnthropicAwsClient`。
 - 閘道的 `IChatClient` 抽象讓三種方式可以互換，日後要改走 Bedrock，業務程式碼也不必修改。
 
-**待確認**：
+### 7.1 已查證事項（Anthropic 官方文件，2026-10）
 
-- Claude Platform on AWS 可用的區域；如果台北區域沒有，要看能接上的最近區域。
-- `inference_geo` 能指定哪些地理區。這關係到「推論在哪裡執行」的說法，要以官方文件的現況為準。
+| 項目 | 結果 |
+| --- | --- |
+| VPC endpoint | **支援** AWS PrivateLink |
+| 區域 | 文件寫「All AWS commercial regions are supported」，workspace 可以建在台北區域（開通時在主控台再確認一次） |
+| `inference_geo` | 只有 `"global"`（預設，可能在全球任何 Anthropic 資料中心推論）和 `"us"`（只在美國推論，價格 1.1 倍）。**沒有台灣或亞太選項** |
+| AWS 區域與推論位置 | workspace 綁定的區域只決定**端點**和 IAM、CloudTrail、帳單的範圍，**不決定推論在哪裡** |
+| 資料保存位置 | Claude Platform on AWS 上無法設定，目前為 `"us"` |
+| 資料處理者 | Anthropic；資料保留政策同第一方 API，零資料保留（ZDR）需向 Anthropic 申請 |
+| Workspace 限制 | 一個 workspace 綁定一個區域，只能透過該區域的端點存取 |
 
-不論答案是什麼，跨出平台的都只有代號。
+**結論**：端點在台北，但**推論和保存都在境外**。這正是隱道要解決的問題：出境的只有代號，對照表留在台北。
+
+**平台設定**：
+
+- workspace 建在台北區域，透過台北的 PrivateLink 端點連線。
+- `default_inference_geo` 和 `allowed_inference_geos` 在 workspace 層級設定，不靠每個請求自己帶參數。預設 `global`；有需要的租戶可以改成 `us`（成本 1.1 倍）。
+- 回覆中的 `usage.inference_geo` 寫進 `AI_REQUEST_LOG`，留下實際推論位置的紀錄。
+- ZDR 是否申請：建議正式上線前向 Anthropic 申請，降低境外留存的範圍。
+
+### 7.2 有特殊合規要求的租戶：建議自建地端 AI
+
+**做法**：如果租戶在合約或法規上有以下要求，平台不提供境外模型給這類請求，而是**建議租戶在自己的機房架設地端 AI**（Ollama、vLLM 等 OpenAI 相容端點），平台透過**隱道連接器**接過去：
+
+- 資料（即使是代號化後的內容）不得出境
+- 推論必須在特定地點或特定處理者的設施內進行
+- 主管機關對委外處理或跨境傳輸有限制（例如金融、醫療、公部門）
+
+**為什麼這樣建議**：
+
+1. **只有地端能完全滿足「資料不出境」**：Claude Platform on AWS 的推論位置只有 `global` 和 `us`，沒有台灣選項。代號化仍屬於個資法上的假名化資料，對要求最嚴格的租戶，代號出境本身就可能不被接受。
+2. **處理者的問題一次解決**：地端模型由租戶自己營運，不涉及第三方資料處理者，也不需要另外簽資料處理協議或評估跨境傳輸。
+3. **不另外維護第二條雲端模型路徑**：另一個選項是改走 Bedrock（AWS 為唯一處理者，推論區域由區域和 inference profile 決定），但這要多維護一條路徑和另一套模型 ID、功能差異，而且仍然在租戶的控制範圍之外。最嚴格的需求直接交給地端，架構比較單純。
+4. **架構已經預留**：隱道連接器只需要改 endpoint 就能切換。租戶的請求依路由政策導向地端，業務程式碼不必修改。
+5. **可以換取更好的回答品質**：模型在租戶自己的機房時，可以依租戶政策不做遮蔽，模型看得到完整上下文。
+
+**取捨（要先跟租戶講清楚）**：地端模型的能力通常不如 Claude；硬體（GPU）、營運、更新由租戶負責；平台只保證連接器和路由的正確性，不保證地端模型的回答品質與可用性。
+
+### 7.3 其他
+
 - **Ollama 的定位**：在 AWS 上跑 Ollama 需要 GPU 機型，成本不低。平台內的 Ollama 只當開發和測試用的替身，以及驗證隱道連接器；正式環境的地端模型由租戶在自己的機房提供。
 - **路由政策**：模型就在租戶機房時，可以依租戶政策不做遮蔽，換取較好的回答品質。是否遮蔽由「資料分級 × 目的地」決定。
 
@@ -174,6 +212,13 @@ flowchart LR
 
 代號化在個資法和 GDPR 的框架下都屬於**假名化**，資料仍然算個人資料。對外不宣稱「匿名化」或「完全無法識別」，因為上下文可能還帶著間接識別資訊（例如罕見職稱加地點加日期的組合）。
 
+**跨境傳輸**：Claude Platform on AWS 的推論和保存在境外，等於把（假名化的）個人資料傳到境外處理。建議：
+
+- 服務條款和隱私權政策中揭露「AI 推論在境外進行，送出的內容已經過代號化」。
+- 和租戶的合約寫明資料處理者（Anthropic）與推論位置。
+- 金融、醫療等受特定主管機關規範的租戶，上線前請法務確認委外與跨境規定；有疑慮就走第 7.2 節的地端方案。
+- 對外說法統一為「平台在台灣，只有代號化後的內容出境」，不說「資料都在台灣」。
+
 ---
 
 ## 10. 遮蔽品質的驗證：測試集
@@ -187,7 +232,10 @@ flowchart LR
 
 ## 11. 待決事項
 
-- [ ] Claude Platform on AWS 可用的區域、`inference_geo` 的選項，以及是否支援 VPC endpoint
+- [x] Claude Platform on AWS 可用的區域、`inference_geo` 的選項，以及是否支援 VPC endpoint（見第 7.1 節）
+- [ ] 是否向 Anthropic 申請零資料保留（ZDR）
+- [ ] 預設 `inference_geo` 用 `global` 還是 `us`
+- [ ] 跨境傳輸的揭露文字與合約條款（法務）
 - [ ] 檢查點遇到低信心命中時，各租戶的預設政策
 - [ ] 代號是否帶屬性（性別、角色）
 - [ ] 間接識別資訊的遮蔽規則
