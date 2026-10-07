@@ -56,7 +56,7 @@ AI 相關功能、檔案上傳、非同步處理。
 
 | 類別 | 項目 |
 | --- | --- |
-| 出口 | 開 Bedrock VPC endpoint；IAM 只授權給閘道的 role；網路設定確保其他服務連不到外部模型 |
+| 出口 | 閘道經 egress proxy（或 Network Firewall）連到 Claude Platform on AWS，allowlist 只放行 `aws-external-anthropic.{region}.api.aws`；呼叫權限只授權給閘道的 IAM role；設定好 workspace ID |
 | 閘道管線 | `IChatClient` + `DelegatingChatClient`：遮蔽 → 檢查點 → 送出 → 還原 → 計量 |
 | 遮蔽器 | 正規表示式 + 租戶字典（字典的管理介面和匯入功能）。NER 列為本階段後段項目 |
 | 檢查點 | 對照表原值比對、正規表示式重掃、字典比對；依 Veilway2.md 第 5 節處理，故障時 fail-closed |
@@ -86,7 +86,8 @@ Tool calling、RAG、檔案上傳。
 
 ### 風險
 
-- 台北區域 Bedrock 能用的模型清單要先確認，最好在第一階段就查清楚
+- Claude Platform on AWS 可用的區域和 `inference_geo` 選項要先確認，最好在第一階段就查清楚
+- 如果不支援 VPC endpoint，egress proxy 會是出口管控的關鍵元件，要做高可用
 - 模型可能不會原樣保留代號，還原器的容錯規則需要用實際回覆來調整
 - 串流加還原的延遲要量測
 
@@ -111,7 +112,7 @@ Tool calling、RAG、檔案上傳。
 - RAG：向量庫加上租戶範圍的對照表
 - Tool calling：參數還原 → 在平台內執行 → 結果重新遮蔽
 - 隱道連接器正式接上租戶機房的模型，並套用路由政策
-- 改走 Claude Platform on AWS，以使用 Batch 等 Bedrock 沒有的功能
+- 用 Batch API 處理大量文件（非即時工作半價）
 
 ### 驗收標準
 
@@ -139,5 +140,5 @@ Tool calling、RAG、檔案上傳。
 
 1. 用 CDK 還是 Terraform
 2. 後端跑在 ECS Fargate 還是 EC2
-3. 台北區域 Bedrock 的模型清單（會影響第二階段）
+3. 開通 Claude Platform on AWS（AWS Marketplace 訂閱、workspace），並確認可用區域和 `inference_geo` 選項（會影響第二階段）
 4. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前

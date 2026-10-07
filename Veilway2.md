@@ -26,7 +26,7 @@ flowchart LR
   API --> GW[隱道閘道]
   WK --> GW
   GW --> RDS
-  GW -- 唯一對外 AI 路徑<br/>只送代號 --> BR[Bedrock<br/>VPC endpoint]
+  GW -- 唯一對外 AI 路徑<br/>只送代號 --> EP[Egress Proxy<br/>網域 allowlist] --> CP[Claude Platform on AWS]
   GW -- 隱道連接器 --> OL[Ollama / vLLM<br/>租戶機房或開發用]
 ```
 
@@ -118,24 +118,43 @@ flowchart LR
 ## 6. 出口管控：「唯一出口」用網路設定強制做到
 
 - 後端放在私有子網，不給一般的對外網路。
-- AI 只能透過 **Bedrock VPC endpoint（PrivateLink）** 出去。
-- 呼叫模型的 IAM 權限只授權給閘道的 role，其他服務就算裝了 SDK 也打不出去。
-- 需要其他對外連線時（例如寄信），走 egress proxy 加網域 allowlist。
+- 閘道連到 **Claude Platform on AWS** 的流量，經過 egress proxy（或 AWS Network Firewall）加網域 allowlist，只放行 `aws-external-anthropic.{region}.api.aws`。其他服務的 security group 不放行這條路徑。
+- **雙重鎖定**：Claude Platform on AWS 用 IAM／SigV4 驗證，呼叫權限只授權給閘道的 IAM role。其他服務就算網路連得到、也裝了 SDK，沒有權限也呼叫不了。
+- **待確認**：Claude Platform on AWS 是否支援 VPC endpoint（PrivateLink）。如果支援，就改走 VPC endpoint，後端子網連 NAT 都不需要。
+- 需要其他對外連線時（例如寄信），同樣走 egress proxy 加網域 allowlist。
 - **日誌也是外洩路徑**：應用程式日誌和例外訊息不能印出原始 prompt，CloudWatch 要定期抽查。
 
 ---
 
 ## 7. 模型接入方式
 
-| | Amazon Bedrock（**MVP 採用**） | Claude Platform on AWS | 直連 Anthropic API |
+| | Claude Platform on AWS（**採用**） | Amazon Bedrock | 直連 Anthropic API |
 | --- | --- | --- | --- |
-| 營運方 | AWS | Anthropic（走 AWS 的帳號和計費） | Anthropic |
+| 營運方 | Anthropic（走 AWS 的帳號和計費） | AWS | Anthropic |
 | 驗證 | IAM／SigV4 | IAM／SigV4 | API key |
-| 功能 | 是子集，新功能較晚到；沒有 Batch、Files API 等 | 和第一方 API 同步 | 完整 |
-| 網路 | VPC endpoint，最容易鎖住出口 | AWS 端點 | 經過公網，需要 NAT 和 allowlist |
+| 計費 | AWS Marketplace | AWS 帳單 | Anthropic 帳單 |
+| 功能 | 和第一方 API 同步，含 Batch、Files API、`inference_geo` | 是子集，新功能較晚到；沒有 Batch、Files API 等 | 完整 |
+| 網路 | AWS 端點 `aws-external-anthropic.{region}.api.aws`；出口靠 egress allowlist 加 IAM 鎖定 | VPC endpoint | 經過公網，需要 NAT 和 allowlist |
+| 模型 ID | 第一方 ID，不加前綴 | 需加 `anthropic.` 前綴 | 第一方 ID |
 
-- 閘道的 `IChatClient` 抽象讓三種方式可以互換，業務程式碼不必修改。
-- **待確認**：台北區域的 Bedrock 能不能直接用到所需的 Claude 模型，還是要走跨區推論。這關係到「推論在哪裡執行」的說法，要以 AWS 主控台和文件的現況為準。不論答案是什麼，跨出平台的都只有代號。
+**採用理由**：
+
+- 新模型和新功能同步推出。
+- 有 Batch（非即時工作半價）和 Files API，第三階段的文件處理可以直接用上。
+- 仍然是 IAM 驗證、AWS 計費，和其他 AWS 服務一起管理。
+
+**設定重點**：
+
+- 建立 client 時必須提供 `AWS_REGION` 和 workspace ID（`ANTHROPIC_AWS_WORKSPACE_ID`），兩者都沒有預設值。
+- C# 使用 `Anthropic.Aws` 套件的 `AnthropicAwsClient`。
+- 閘道的 `IChatClient` 抽象讓三種方式可以互換，日後要改走 Bedrock，業務程式碼也不必修改。
+
+**待確認**：
+
+- Claude Platform on AWS 可用的區域；如果台北區域沒有，要看能接上的最近區域。
+- `inference_geo` 能指定哪些地理區。這關係到「推論在哪裡執行」的說法，要以官方文件的現況為準。
+
+不論答案是什麼，跨出平台的都只有代號。
 - **Ollama 的定位**：在 AWS 上跑 Ollama 需要 GPU 機型，成本不低。平台內的 Ollama 只當開發和測試用的替身，以及驗證隱道連接器；正式環境的地端模型由租戶在自己的機房提供。
 - **路由政策**：模型就在租戶機房時，可以依租戶政策不做遮蔽，換取較好的回答品質。是否遮蔽由「資料分級 × 目的地」決定。
 
@@ -168,7 +187,7 @@ flowchart LR
 
 ## 11. 待決事項
 
-- [ ] 台北區域 Bedrock 能用的模型清單，以及是否需要跨區推論
+- [ ] Claude Platform on AWS 可用的區域、`inference_geo` 的選項，以及是否支援 VPC endpoint
 - [ ] 檢查點遇到低信心命中時，各租戶的預設政策
 - [ ] 代號是否帶屬性（性別、角色）
 - [ ] 間接識別資訊的遮蔽規則
