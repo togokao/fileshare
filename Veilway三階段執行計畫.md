@@ -1,6 +1,6 @@
 # Veilway 三階段執行計畫
 
-架構說明見〈Veilway2.md〉。
+架構說明見〈Veilway2.md〉。第一階段的操作步驟見〈Veilway第一階段操作手冊.md〉。
 
 ## 原則
 
@@ -60,7 +60,9 @@ AI 相關功能、檔案上傳、非同步處理。
 
 | 類別 | 項目 |
 | --- | --- |
+| 閘道服務 | 隱道閘道是**獨立的 ECS service**（自己的 security group 與 task role），業務 API 透過 Service Connect 呼叫它；第一階段已預留結構 |
 | 出口 | 建立 Claude Platform on AWS 的 PrivateLink VPC endpoint（台北區域）；endpoint 的 security group 和 endpoint policy 只允許閘道；呼叫權限只授權給閘道的 IAM role；設定 workspace ID |
+| 出口管控 | 應用子網的其他對外連線改走 egress proxy 或 Network Firewall，加網域 allowlist，**不放行任何 AI 服務的網域**（第一階段經 NAT 完整對外，是已知、暫時的狀態） |
 | 推論位置 | workspace 層級設定 `default_inference_geo`、`allowed_inference_geos`；回覆中的 `usage.inference_geo` 寫進 `AI_REQUEST_LOG` |
 | 閘道管線 | `IChatClient` + `DelegatingChatClient`：遮蔽 → 檢查點 → 送出 → 還原 → 計量 |
 | 遮蔽器 | 正規表示式 + 租戶字典（字典的管理介面和匯入功能）。NER 列為本階段後段項目 |
