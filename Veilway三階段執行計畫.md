@@ -50,7 +50,7 @@ AI 相關功能、檔案上傳、非同步處理。
 ### 風險
 
 - Row-Level Security 和 ORM（例如 EF Core）的整合方式要先試做驗證
-- 正式環境依原圖用 ECS Fargate（至少 2 個容器）與多可用區 RDS；MVP 可先用單台 EC2、單可用區省成本，但 IaC 要保留切換的設定，不要寫死
+- 正式環境依原圖用 ECS Fargate（至少 2 個容器）與多可用區 RDS；dev 為了省成本用 1 個 Fargate 容器、單可用區 RDS、1 個 NAT（仍保留 ALB），環境差異寫成 IaC 的設定，不要寫死
 
 ---
 
@@ -149,6 +149,6 @@ Tool calling、RAG、檔案上傳。
 
 1. 用 CDK 還是 Terraform
 2. 網域名稱與租戶子網域的命名規則（萬用憑證要先申請）
-3. MVP 是否先用單台 EC2、單可用區 RDS 省成本（正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS）
+3. ~~MVP 是否先用單台 EC2、單可用區 RDS 省成本~~ 已定案：dev 用 1 個 Fargate 容器、單可用區 RDS；正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS（見〈Veilway第一階段操作手冊.md〉第 0 步）
 4. 開通 Claude Platform on AWS：AWS Marketplace 訂閱、在台北區域建立 workspace，並決定預設 `inference_geo`（`global` 或 `us`）與是否申請 ZDR
 5. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前，嵌入模型也要提早選定

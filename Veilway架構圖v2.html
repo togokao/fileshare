@@ -213,7 +213,7 @@ code{font-family:var(--f-mono);font-size:.9em}
           <text class="s" x="645" y="509" text-anchor="middle">長任務 · 影音處理</text>
         </svg>
       </div>
-      <figcaption><b>琥珀色是唯一跨出平台的路徑。</b>平台元件都在台北區域內；登入（Cognito）、金鑰（Secrets Manager／KMS）、監控（CloudWatch）屬於橫向服務，圖中省略。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2。線上模型由原文件的 Amazon Bedrock 改為 Claude Platform on AWS：同樣走 AWS IAM 與帳單，但功能與 Anthropic 自家 API 同步。<b>隱道閘道是獨立的 ECS service</b>，有自己的 security group 與 IAM role；業務 API 經 Service Connect 呼叫它，本身沒有呼叫模型的權限。閘道經 <b>PrivateLink</b> 連線，不經過公網，endpoint 只允許閘道連入；其他對外連線走 egress proxy／Network Firewall，allowlist 不放行任何 AI 服務。注意：<b>模型推論在 Anthropic 的資料中心進行（global 或 us），不在台北</b>；跨出平台的只有代號化後的內容（見「出口與推論位置」）。</figcaption>
+      <figcaption><b>琥珀色是唯一跨出平台的路徑。</b>平台元件都在台北區域內；登入（Cognito）、金鑰（Secrets Manager／KMS）、監控（CloudWatch）屬於橫向服務，圖中省略。dev 環境為了省成本，API service 只跑 1 個容器、RDS 用單可用區，但仍保留 ALB。線上模型由原文件的 Amazon Bedrock 改為 Claude Platform on AWS：同樣走 AWS IAM 與帳單，但功能與 Anthropic 自家 API 同步。<b>隱道閘道是獨立的 ECS service</b>，有自己的 security group 與 IAM role；業務 API 經 Service Connect 呼叫它，本身沒有呼叫模型的權限。閘道經 <b>PrivateLink</b> 連線，不經過公網，endpoint 只允許閘道連入；其他對外連線走 egress proxy／Network Firewall，allowlist 不放行任何 AI 服務。注意：<b>模型推論在 Anthropic 的資料中心進行（global 或 us），不在台北</b>；跨出平台的只有代號化後的內容（見「出口與推論位置」）。</figcaption>
     </figure>
   </section>
 

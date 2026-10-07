@@ -54,7 +54,7 @@ flowchart LR
 | --- | --- | --- |
 | 邊緣 | CloudFront + WAF | 單一網域、萬用憑證，每個租戶一個子網域（例如 `acme.example.com`）；前台快取、TLS、基本防護。`/*` 到 S3 前台，`/api/*` 到 ALB |
 | 前台 | S3 靜態網站（SPA） | 只透過 CloudFront 存取（OAC），bucket 不公開 |
-| 分流 | ALB | 只負責分流到後端容器。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2 |
+| 分流 | ALB | 只負責分流到後端容器。各環境都保留 ALB；dev 為了省成本，API service 只跑 1 個容器、RDS 用單可用區（見〈Veilway第一階段操作手冊.md〉第 0 步） |
 | 後端 | ASP.NET Core · ECS Fargate | 跑在私有子網，分成兩個 service：**API service**（業務 API、租戶管理、媒體上傳；正式環境**至少 2 個容器**，跨可用區）與 **閘道 service**（隱道閘道）。API 透過 ECS Service Connect 呼叫閘道 |
 | 租戶管理 | 後端模組 | 租戶的方案、額度、計量；AI token 用量與檔案用量都記在這裡 |
 | 媒體上傳 | 後端模組 | 簽發 S3 直傳網址（presigned URL），檔案不經過後端 |
