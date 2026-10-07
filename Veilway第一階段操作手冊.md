@@ -1,0 +1,838 @@
+# Veilway 第一階段操作手冊：骨架（修訂版）
+
+對應〈Veilway三階段執行計畫.md〉的第一階段。架構以〈Veilway2.md〉和〈Veilway架構圖v2.pdf〉為準。
+
+**第一階段完成時能做到**：使用者從租戶子網域登入，前台呼叫 API，API 依租戶讀寫資料；整個環境可以用 IaC 重建。
+
+### 本版修訂重點
+
+| 類別 | 修訂 |
+| --- | --- |
+| 已定案 | ① 隱道閘道在第二階段拆成**獨立的 ECS service**（自己的 SG 與 task role），第一階段的 IaC 先預留結構 ② **出口管控**（egress proxy／Network Firewall）延到第二階段 ③ **一位使用者只屬於一個租戶** |
+| 修正錯誤 | pgvector 要建在 `veilway` 資料庫內；RLS 政策改用 `nullif(...)`，避免連線重用時出錯；EF Core 的 RLS 設定改用交易攔截器；Cognito 登入網域與 callback 網址拆成不同主機；CloudFront 連 ALB 改用 `origin-api.example.com`；限流需要分散式實作；migration 改在 VPC 內用 ECS 執行 |
+| 補上漏項 | 租戶解析函式、方案資料表、平台開通流程、使用者建立流程、登入稽核、refresh token 撤銷、管理員 MFA、密碼輪替、sandbox 帳號 |
+
+---
+
+## 怎麼使用這份手冊
+
+- 步驟依**相依順序**排列，請照順序做。每一步都有「目的 → 操作 → 驗證 → 注意事項」。
+- **建議做法**：
+  1. 先在 **sandbox 帳號**用主控台照手冊做一遍，弄懂每個設定的作用。做完就整個帳號清掉。
+  2. 接著在第 14 步把設定寫成 IaC。**dev、staging、prod 一開始就用 IaC 建立**，不要拿手動建的環境轉成 IaC，因為手動建立的資源沒辦法用 `cdk destroy` 刪除，重建演練也做不了。
+  3. 之後一律只改 IaC，不再手動點主控台。
+- 主控台路徑寫成「服務 → 頁面 → 按鈕」。
+- 本手冊中的 `example.com` 請換成你們的網域，`<…>` 是要自行填入的值。
+- 標示 ⚠️ 的是容易出錯、事後很難改的地方。
+
+### 名詞速查
+
+| 名詞 | 白話說明 |
+| --- | --- |
+| VPC | 你在 AWS 上的私有網路 |
+| 子網（Subnet） | VPC 裡的分區。公有子網可直接連外網，私有子網不行 |
+| 可用區（AZ） | 同一區域內彼此獨立的機房。服務分散在多個 AZ，一個機房出事也不會停 |
+| Security Group（SG） | 每個資源的防火牆規則 |
+| NAT Gateway | 讓私有子網的服務可以「主動連出去」，但外面連不進來 |
+| VPC endpoint | 讓私有子網不經過網際網路，直接連到 AWS 服務 |
+| IAM role | 給程式或服務用的權限身分，不需要存放金鑰 |
+| ECS service／task | service 是一組長期執行的容器；task 是單次執行的容器（例如 migration） |
+| IaC | 用程式碼描述基礎設施，可以重複建立相同環境 |
+
+---
+
+## 第 0 步：開工前的決定
+
+這些決定會影響後面每一步，請先定案。
+
+| 項目 | 建議 | 說明 |
+| --- | --- | --- |
+| IaC 工具 | **AWS CDK（C#）** | 團隊用 C#，CDK 可以用同一種語言寫基礎設施；Terraform 也可以，二選一即可 |
+| 帳號結構 | **每個環境一個 AWS 帳號**（sandbox、dev、staging、prod） | 用 AWS Organizations 管理。環境之間權限和帳單完全隔開。sandbox 給手動練習用，可以隨時清空 |
+| 區域 | **台北 ap-east-2** | 少數服務必須在 us-east-1（見第 2、11 步） |
+| 網域 | 例如 `example.com`；租戶用 `<租戶>.example.com` | 要能管理 DNS，建議 DNS 放在 Route 53 |
+| 子網域命名規則 | 只允許小寫英數字和連字號，長度 3～63；**保留名稱**：`www`、`api`、`admin`、`app`、`auth`、`login`、`origin-api`、`static`、`mail` | 子網域會成為租戶的識別，事後很難改。`auth`、`login`、`origin-api` 在本手冊有固定用途（第 7、10、11 步） |
+| 使用者與租戶 | **一位使用者只屬於一個租戶**；email 在整個平台唯一 | 同一個人要進兩個租戶，就用兩個 email 開兩個帳號。這個決定會寫進 Cognito 的設定，事後很難改 |
+| 後端服務切分 | 第一階段只有 **API service**；第二階段新增獨立的 **閘道 service** | 閘道必須有自己的 SG 和 task role，第二階段的出口鎖定才有效（見第 9 步） |
+| 出口管控 | **第二階段**再加 egress proxy 或 Network Firewall | 第一階段應用子網經 NAT 可以完整對外，這是已知、暫時的狀態（見第 3 步） |
+| MVP 規格 | dev：單 AZ 的 RDS、1 個 Fargate 容器、1 個 NAT<br>prod：多 AZ、至少 2 個容器、每個 AZ 一個 NAT | 照原圖，正式環境是 Fargate 至少 2 個容器、多可用區 RDS |
+| 原始碼與 CI/CD | GitHub + GitHub Actions | 用 OIDC 連 AWS，不存放長期金鑰（第 13 步） |
+
+> ⚠️ **台北區域的服務可用性**：台北區域於 2025 年 6 月開放，Cognito 於 2026 年 3 月上線台北。開工前請到 AWS 的「各區域服務清單」確認本手冊用到的服務（ECS Fargate、Cognito、ElastiCache、RDS、WAF、ACM、ECR、Secrets Manager、KMS、Lambda、VPC endpoint）都已在台北提供。
+
+### 開工前的試做：RLS 與 EF Core
+
+計畫書把「Row-Level Security 和 EF Core 的整合」列為風險。請在第 5 步之前，先用本機的 PostgreSQL（例如 Docker）做一個小專案，驗證第 5.4 節的寫法：
+
+- [ ] 連線被連線池重用時，不會帶著上一個請求的租戶
+- [ ] 沒有設定租戶時查詢拿到 0 筆，**不會丟出錯誤**
+- [ ] EF Core 的重試機制（retry）和明確交易可以一起運作
+
+這三點沒有通過，就不要往下做第 5 步。
+
+---
+
+## 第 1 步：帳號與安全基線
+
+**目的**：在建立任何資源之前，先把帳號鎖好、把費用監控設好。
+
+### 操作
+
+1. **保護 root 帳號**
+   - 以 root 登入 → 右上角帳號名稱 → **Security credentials** → 為 root 設定 **MFA**。
+   - 刪除 root 的存取金鑰（如果有）。之後**不再用 root 做日常操作**。
+2. **建立組織與環境帳號**
+   - **AWS Organizations** → **Create an organization** → 新增帳號：`veilway-sandbox`、`veilway-dev`、`veilway-staging`、`veilway-prod`。
+3. **人員登入改用 IAM Identity Center**
+   - **IAM Identity Center** → **Enable** → 建立使用者與群組 → 指派權限集（例如開發者在 sandbox、dev 有 `PowerUserAccess`，在 prod 只有唯讀）。
+   - 每位成員都要設定 MFA。
+4. **啟用台北區域** ⚠️
+   - 台北是「需要手動開啟」的區域（opt-in region），預設是關閉的。
+   - 主控台右上角帳號名稱 → **Account** → **AWS Regions** → 找到 **Asia Pacific (Taipei)** → **Enable**。
+   - 每個環境帳號都要各自開啟，開啟需要幾分鐘到數小時。
+5. **費用告警**
+   - **Billing and Cost Management** → **Budgets** → **Create budget** → 每個帳號一份每月預算，並設定在實際花費達 50%、80%、100% 時寄信通知。
+6. **稽核紀錄**
+   - **CloudTrail** → **Create trail** → 套用到組織的所有帳號、所有區域，紀錄存進專用的 S3 bucket（開啟加密，並禁止刪除）。
+
+### 驗證
+
+- [ ] root 已設定 MFA，且沒有存取金鑰
+- [ ] 可以用 Identity Center 帳號登入各環境
+- [ ] 區域選單看得到「亞太地區（台北）」，並能切換過去
+- [ ] 收到 Budgets 的測試通知
+
+### 注意事項
+
+- 台北區域沒開啟前，該區域的所有資源都建不起來，錯誤訊息也不一定直接說明原因。
+- Budgets 和帳單相關的設定在全域頁面，不屬於台北區域。
+
+---
+
+## 第 2 步：網域與憑證
+
+**目的**：準備 DNS 和 HTTPS 憑證。憑證要等 DNS 驗證，越早申請越好。
+
+### 操作
+
+1. **DNS**
+   - **Route 53** → **Hosted zones** → **Create hosted zone** → `example.com`。
+   - 如果網域在其他註冊商，把註冊商的 NS 記錄改成 Route 53 給的四筆 NS。
+   - 建議每個環境用不同的網域或子網域（例如 dev 用 `dev.example.net`），避免 dev 的租戶子網域和正式環境混在一起。
+2. **us-east-1 的憑證**（給 CloudFront 和 Cognito 自訂網域） ⚠️ **必須在 us-east-1（維吉尼亞北部）申請**
+   - 切換區域到 **US East (N. Virginia)** → **Certificate Manager** → **Request** → **Request a public certificate**。
+   - 網域名稱填兩筆：`example.com` 和 `*.example.com`。
+   - 驗證方式選 **DNS validation** → **Create records in Route 53**。
+3. **台北的憑證**（給 ALB）
+   - 切回 **台北** → **Certificate Manager** → 同樣申請 `example.com`、`*.example.com`，用 DNS 驗證。
+
+### 驗證
+
+- [ ] 兩張憑證的狀態都是 **Issued**（一張在 us-east-1，一張在台北）
+
+### 注意事項
+
+- ⚠️ CloudFront 和 Cognito 自訂網域都只能用 **us-east-1** 的憑證。在台北申請的憑證，設定畫面選不到。
+- ⚠️ 萬用憑證 `*.example.com` **只涵蓋一層**：`acme.example.com` 可以，`api.acme.example.com` 不行，`example.com` 本身也不包含，所以要另外列出。
+- ACM 憑證會自動續約，前提是 DNS 驗證用的 CNAME 記錄不能刪掉。
+
+---
+
+## 第 3 步：VPC 網路
+
+**目的**：建立私有網路。這一步決定了日後「唯一出口」能不能做到。
+
+### 規劃
+
+| 子網類型 | 放什麼 | 能不能直接連外 |
+| --- | --- | --- |
+| 公有子網 | ALB、NAT Gateway | 可以 |
+| 私有應用子網 | Fargate 容器（第一階段：API；第二階段加上閘道） | 經 NAT 或 VPC endpoint 連出去 |
+| 私有資料子網 | RDS、ElastiCache | **完全不能連外** |
+
+每種子網在每個 AZ 各一個。dev 可以用 2 個 AZ，prod 建議 3 個 AZ（台北有 3 個 AZ）。
+
+### 操作
+
+1. **VPC** → **Create VPC** → 選 **VPC and more**：
+   - 名稱：`veilway-dev`；IPv4 CIDR：`10.0.0.0/16`
+   - Number of AZs：2（prod：3）
+   - Public subnets：2；Private subnets：4（每個 AZ 一個應用子網、一個資料子網）
+   - NAT gateways：dev 選 **In 1 AZ**；prod 選 **1 per AZ**
+   - VPC endpoints：勾選 **S3 Gateway**
+2. **調整資料子網的路由**：精靈建立的私有路由表都會指向 NAT。請為資料子網另外建一張路由表，**不要**有 `0.0.0.0/0` 這條路由，確保 RDS、ElastiCache 完全連不出去。
+3. **建立 VPC interface endpoint**（減少走 NAT 的流量，也比較安全）
+   - **VPC** → **Endpoints** → **Create endpoint**，依序建立：`ecr.api`、`ecr.dkr`、`logs`、`secretsmanager`、`sts`、`kms`。dev 若要用 ECS Exec，再加 `ssmmessages`。
+   - 子網選私有應用子網，開啟 **Private DNS**，SG 用 `sg-endpoints`。
+4. **建立 Security Group**（先建空的，後面的步驟再引用）
+
+| SG 名稱 | 允許連入 | 來源 | 階段 |
+| --- | --- | --- | --- |
+| `sg-alb` | 443 | CloudFront 的 managed prefix list `com.amazonaws.global.cloudfront.origin-facing` | 1 |
+| `sg-api` | 8080（容器的服務埠） | `sg-alb` | 1 |
+| `sg-rds` | 5432 | `sg-api`、`sg-ops` | 1 |
+| `sg-cache` | 6379 | `sg-api` | 1 |
+| `sg-endpoints` | 443 | `sg-api`、`sg-ops` | 1 |
+| `sg-ops` | 不允許連入 | — | 1（migration、開通工具等單次 task 使用） |
+| `sg-gateway` | 8080 | `sg-api` | **2**（第一階段不用建，IaC 預留） |
+
+### 驗證
+
+- [ ] 資料子網的路由表裡沒有 `0.0.0.0/0`
+- [ ] `sg-rds`、`sg-cache` 只允許上表列出的 SG 連入
+
+### 注意事項
+
+- ⚠️ CIDR 一旦決定很難更改。如果未來可能和公司內網或租戶機房做 VPN 互連（第三階段的隱道連接器），請先確認 `10.0.0.0/16` 不會跟對方的網段重疊。
+- ⚠️ **第一階段的已知限制**：應用子網經 NAT 可以連到任何外部網址。出口管控（egress proxy 或 AWS Network Firewall 加網域 allowlist）排在**第二階段**，和閘道 service 一起上線。在那之前，**任何環境都不放 AI 服務的 API key**。
+- CloudFront 的 prefix list 在 SG 裡會佔用約 50 條規則的額度（每個 SG 預設上限 60 條），`sg-alb` 請不要再加其他規則。
+- NAT Gateway 按小時和流量計費，是 dev 環境裡最容易被忽略的費用。
+- SG 的規則要用「另一個 SG」當來源，不要寫死 IP。
+- 第二階段會在這個 VPC 加上 Claude Platform on AWS 的 PrivateLink endpoint，屆時只允許 `sg-gateway` 連到它。
+
+---
+
+## 第 4 步：KMS 與 Secrets Manager
+
+**目的**：準備加密金鑰和密碼的存放位置。
+
+### 操作
+
+1. **KMS** → **Customer managed keys** → **Create key**，建立平台用的金鑰：
+   - `veilway-data`：加密 RDS、S3、ElastiCache
+   - `veilway-logs`：加密 CloudWatch Logs
+   - 開啟 **Automatic key rotation**（每年自動輪替）
+2. **租戶金鑰的機制**（第一階段只建立機制；真正用到是第二階段的對照表）
+   - 先決定做法（建議在租戶數量規劃確定後定案）：
+
+   | 做法 | 優點 | 缺點 |
+   | --- | --- | --- |
+   | 每個租戶一把 KMS key | 隔離最清楚，可以單獨停用某租戶的金鑰 | 每把金鑰每月固定費用；租戶多時費用與數量上限要評估 |
+   | 一把主金鑰 + 每個租戶各自的資料金鑰（envelope encryption） | 費用固定 | 要自己管理資料金鑰的儲存與輪替 |
+
+   - 不論哪一種，**建立金鑰的權限只給「平台開通工具」**（第 9 步的 `veilway-provision` task），API 的 task role 只有使用金鑰（Encrypt／Decrypt）的權限，**沒有** `kms:CreateKey`。
+   - 每個租戶一把 key 時：別名 `alias/veilway/tenant/<tenant_id>`，金鑰 ARN 存進 `tenants.kms_key_arn`，金鑰政策只允許後端的 task role 使用。
+3. **Secrets Manager**：這一步先不手動建立，RDS 的主帳號密碼會在第 5 步由 RDS 自動放進來。
+
+### 注意事項
+
+- KMS 金鑰刪除時有 7 到 30 天的等待期，刪除後用它加密的資料就永遠無法解開，刪除前要特別小心。
+- 建立金鑰時設定的金鑰政策如果寫錯，可能連管理員都無法再管理這把金鑰。政策裡一定要保留帳號根身分的管理權限。
+
+---
+
+## 第 5 步：RDS PostgreSQL
+
+**目的**：建立資料庫，並把多租戶隔離（Row-Level Security）在第一天就設定好。
+
+### 5.1 建立資料庫
+
+1. **RDS** → **Subnet groups** → **Create DB subnet group** → 只選**私有資料子網**。
+2. **RDS** → **Create database**：
+
+| 設定 | dev | prod |
+| --- | --- | --- |
+| Engine | PostgreSQL（選目前 RDS 提供的最新穩定主版本） | 同左 |
+| Template | Dev/Test | Production |
+| 部署方式 | Single-AZ | **Multi-AZ**（評估 Multi-AZ DB cluster，切換時間較短） |
+| 帳密 | **Manage master credentials in AWS Secrets Manager** | 同左 |
+| 執行個體 | Graviton 小型機型（例如 `db.t4g` 系列） | 依負載評估 |
+| 儲存 | gp3，開啟 storage autoscaling | 同左 |
+| 網路 | 第 3 步的 VPC、DB subnet group；**Public access：No**；SG：`sg-rds` | 同左 |
+| 加密 | 開啟，用 `veilway-data` | 同左 |
+| 備份 | 保留 7 天 | 保留 14～35 天 |
+| 刪除保護 | 可關閉 | **開啟** |
+| Performance Insights | 開啟 | 開啟 |
+
+3. **強制使用 SSL**：建立自訂的 parameter group，設定 `rds.force_ssl = 1`，套用到資料庫後重新啟動。
+4. **不要記錄含密碼的 SQL**：parameter group 的 `log_statement` 保持 `none` 或 `ddl`。設成 `ddl` 時，`CREATE ROLE ... PASSWORD` 也會被記錄，所以建立帳號時請照 5.2 的方式設定密碼。
+
+### 5.2 建立帳號、資料庫與擴充
+
+資料庫在私有子網，從外面連不進去。用 ECS Exec 進到一個暫時的容器（SG 用 `sg-ops`），或用 Session Manager 搭配一台跳板機，再用 `psql` 連線。
+
+**先用主帳號連到預設的 `postgres` 資料庫：**
+
+```sql
+-- 擁有資料表的帳號：只給 migration 使用
+CREATE ROLE veilway_owner LOGIN;
+
+-- 應用程式使用的帳號：不能擁有資料表，也不能略過 RLS
+CREATE ROLE veilway_app LOGIN NOBYPASSRLS;
+
+-- 平台開通工具使用的帳號：可以建立租戶，但不能略過 RLS
+CREATE ROLE veilway_platform LOGIN NOBYPASSRLS;
+
+-- PostgreSQL 16 起，主帳號要先成為 veilway_owner 的成員，才能把資料庫交給它
+GRANT veilway_owner TO CURRENT_USER;
+
+CREATE DATABASE veilway OWNER veilway_owner;
+REVOKE ALL ON DATABASE veilway FROM PUBLIC;
+GRANT CONNECT ON DATABASE veilway TO veilway_app, veilway_platform;
+```
+
+**設定密碼**：用 `psql` 的 `\password veilway_owner`（依序對三個帳號執行），密碼不會出現在 SQL 文字或日誌裡。密碼由 Secrets Manager 產生（`aws secretsmanager get-random-password`），存成 `veilway/<env>/db/owner`、`veilway/<env>/db/app`、`veilway/<env>/db/platform`。
+
+**再連到 `veilway` 資料庫**（`\c veilway`）：
+
+```sql
+-- ⚠️ 擴充是裝在「單一資料庫」裡的，一定要在 veilway 資料庫內執行
+-- pgvector 第三階段的 RAG 才會用到，先啟用沒有額外成本
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 資料表都放在 app schema，由 veilway_owner 擁有
+CREATE SCHEMA app AUTHORIZATION veilway_owner;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA app TO veilway_app, veilway_platform;
+```
+
+### 5.3 資料表與 Row-Level Security（由 migration 建立）
+
+以下由 migration 以 `veilway_owner` 身分執行。
+
+```sql
+SET search_path = app;
+
+-- 方案：平台層級的資料，沒有 tenant_id
+CREATE TABLE plans (
+  id                 text PRIMARY KEY,          -- 例如 'basic'、'pro'
+  name               text NOT NULL,
+  max_users          int  NOT NULL,
+  monthly_ai_tokens  bigint NOT NULL,           -- 第二階段的計量會用到
+  max_storage_gb     int  NOT NULL              -- 第三階段的檔案會用到
+);
+
+-- 租戶：平台層級的資料，由平台開通工具管理
+CREATE TABLE tenants (
+  id          uuid PRIMARY KEY,
+  subdomain   text NOT NULL UNIQUE
+              CHECK (subdomain ~ '^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$'),
+  name        text NOT NULL,
+  plan_id     text NOT NULL REFERENCES plans(id),
+  status      text NOT NULL DEFAULT 'active',   -- active／suspended
+  kms_key_arn text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- 使用者：一位使用者只屬於一個租戶，email 在整個平台唯一
+CREATE TABLE users (
+  id          uuid PRIMARY KEY,
+  tenant_id   uuid NOT NULL REFERENCES tenants(id),
+  cognito_sub text NOT NULL UNIQUE,
+  email       text NOT NULL UNIQUE,
+  role        text NOT NULL,                    -- tenant_admin／member
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- 共用的租戶判斷式：沒有設定、或設定被清成空字串時都回傳 NULL
+CREATE FUNCTION current_tenant_id() RETURNS uuid
+  LANGUAGE sql STABLE
+  AS $$ SELECT nullif(current_setting('app.tenant_id', true), '')::uuid $$;
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users FORCE ROW LEVEL SECURITY;   -- 連資料表擁有者也要遵守
+
+CREATE POLICY tenant_isolation ON users
+  USING      (tenant_id = current_tenant_id())
+  WITH CHECK (tenant_id = current_tenant_id());
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON users TO veilway_app, veilway_platform;
+GRANT EXECUTE ON FUNCTION current_tenant_id() TO veilway_app, veilway_platform;
+
+-- 平台開通工具可以管理租戶和方案
+GRANT SELECT, INSERT, UPDATE ON tenants, plans TO veilway_platform;
+
+-- API 不能直接讀 tenants，只能透過這個函式用子網域查租戶
+CREATE FUNCTION resolve_tenant(p_subdomain text)
+  RETURNS TABLE (tenant_id uuid, status text)
+  LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = app, pg_temp
+  AS $$ SELECT id, status FROM app.tenants WHERE subdomain = p_subdomain $$;
+
+REVOKE ALL ON FUNCTION resolve_tenant(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION resolve_tenant(text) TO veilway_app;
+```
+
+**之後每張帶 `tenant_id` 的資料表都要照 `users` 的模式建立**：`ENABLE` + `FORCE ROW LEVEL SECURITY`，政策用 `current_tenant_id()`。
+
+建議在 CI 加一個檢查：查詢 `pg_class`，凡是有 `tenant_id` 欄位但沒有開啟 `relrowsecurity` 和 `relforcerowsecurity` 的資料表，測試就失敗。
+
+### 5.4 應用程式怎麼設定租戶（EF Core）
+
+應用程式在**每個交易開始時**設定目前的租戶：
+
+```sql
+SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 true：只在這個交易內有效
+```
+
+做法：
+
+- **所有存取都包在明確的交易裡**。用 EF Core 的 `DbTransactionInterceptor`，在 `TransactionStarted` 時執行上面這句。
+- **不要**在 `DbConnectionInterceptor`（開啟連線時）執行 `set_config(..., true)`：在交易之外執行時，它只對那一句自己的隱含交易有效，下一句查詢就沒有租戶了。
+- **不要**用 `SET app.tenant_id = ...` 或 `set_config(..., false)`：設定會留在連線上，連線池把連線借給下一個請求時就會外洩。
+- 開啟 `EnableRetryOnFailure` 時，明確交易要包在 `Database.CreateExecutionStrategy().ExecuteAsync(...)` 裡，否則 EF Core 會拒絕執行。
+- 加一道保險：在 `DbCommandInterceptor` 裡檢查，對帶 `tenant_id` 的資料表下指令時如果不在交易內，就直接丟例外。
+
+### 驗證
+
+- [ ] 從公網連不到資料庫
+- [ ] `veilway` 資料庫內查得到 vector 擴充：`SELECT extname FROM pg_extension;`
+- [ ] 用 `veilway_app` 連線、**沒有設定** `app.tenant_id` 時，查詢 `users` 拿到 0 筆
+- [ ] 在同一條連線上，先在一個交易裡設定租戶 A 並提交，再查詢 `users`：拿到 0 筆、**沒有錯誤**
+- [ ] 設定租戶 A 之後，只看得到 A 的資料；嘗試寫入租戶 B 的資料會被拒絕
+- [ ] `veilway_app` 直接 `SELECT * FROM app.tenants` 會被拒絕；呼叫 `app.resolve_tenant('acme')` 可以拿到結果
+
+### 注意事項
+
+- ⚠️ **RLS 最常見的三個漏洞**：
+  1. 應用程式用了資料表擁有者或主帳號連線 → RLS 被略過。所以應用程式只能用 `veilway_app`，並且要加上 `FORCE ROW LEVEL SECURITY`。
+  2. 用 `SET` 或 session 範圍的設定 → 連線池造成租戶設定殘留。
+  3. `current_setting(...)::uuid` 沒有加 `nullif` → 交易結束後設定變成空字串，連線被重用時查詢直接出錯。
+- 主帳號（master）只用來做管理，不要給應用程式或 migration 使用。
+- `SECURITY DEFINER` 函式一定要設定 `search_path`，否則可能被同名物件劫持。
+- Multi-AZ 在建立後也可以修改，但修改時會有短暫的效能影響，請在離峰時間進行。
+
+---
+
+## 第 6 步：ElastiCache（Session 與限流）
+
+**目的**：存放登入狀態與限流計數。
+
+### 操作
+
+1. **ElastiCache** → **Subnet groups** → 只選**私有資料子網**。
+2. **ElastiCache** → **Create cache**：
+   - 引擎：**Valkey**（與 Redis 相容的開源版本）或 Redis OSS
+   - 部署：dev 可用單節點；prod 選 **Multi-AZ** 並開啟自動容錯移轉（或直接用 Serverless）
+   - **Encryption in transit：開啟**；**Encryption at rest：開啟**（用 `veilway-data`）
+   - 驗證：開啟 **AUTH** 或 RBAC 使用者，密碼存進 Secrets Manager（`veilway/<env>/cache`）
+   - SG：`sg-cache`
+
+### 存放內容規劃
+
+| 用途 | key 範例 | 存活時間 |
+| --- | --- | --- |
+| Session（登出後讓 token 失效） | `session:revoked:<jti>` | 等於 token 剩餘的有效時間 |
+| API 限流 | `rl:<tenant_id>:<user_id>:<分鐘>` | 1～2 分鐘 |
+| 第二階段：AI 額度 | `quota:<tenant_id>:<日期>` | 1 天 |
+
+### 快取故障時的處理（請先定案）
+
+| 功能 | 建議 | 理由 |
+| --- | --- | --- |
+| 一般 API 的限流 | **放行**（fail-open），並觸發告警 | 限流是保護措施，不該讓整個服務停擺 |
+| 一般 API 的登出名單檢查 | **放行**，並觸發告警 | access token 有效時間短（15 分鐘），風險有限 |
+| 管理功能（建立使用者、變更角色） | **拒絕**（fail-closed） | 權限高，寧可暫停 |
+
+### 驗證
+
+- [ ] 從容器內可以用 TLS 連到 ElastiCache；沒帶密碼時被拒絕
+
+### 注意事項
+
+- ⚠️ **不放對照表、不放任何真名或個資**（這是 Veilway2.md 的規則）。key 只能用 ID。
+- 開啟傳輸加密後，程式端的連線字串必須加上 `ssl=true`，否則會一直逾時，而且錯誤訊息不明確。
+
+---
+
+## 第 7 步：Cognito（登入）
+
+**目的**：建立使用者登入，並讓 token 帶上 `tenant_id`。
+
+### 登入流程
+
+Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一個登入入口，登入完成後再回到原本的租戶子網域：
+
+| 主機 | 用途 |
+| --- | --- |
+| `auth.example.com` | Cognito 的登入頁（自訂網域，第 11 步才設定；在那之前用 Cognito 預設網域） |
+| `login.example.com` | 共用的 callback 與登出頁，由同一個 SPA 提供 |
+| `<租戶>.example.com` | 租戶的前台 |
+
+1. 使用者在 `acme.example.com` 按登入。前台產生 PKCE 的 verifier 和隨機的 `state`，存在**自己的** sessionStorage，`state` 裡帶著租戶子網域。
+2. 導向 Cognito 登入頁，`redirect_uri = https://login.example.com/callback`。
+3. 登入成功後，Cognito 帶著 authorization code 導回 `login.example.com/callback`。
+4. callback 頁**不換 token**，只做一件事：從 `state` 取出子網域，**驗證格式**（只能是 `^[a-z0-9-]+$`，且不在保留名稱內），再導向 `https://<子網域>.example.com/auth/complete?code=…&state=…`。
+5. 租戶前台核對 `state`，用自己存的 verifier 和**同一個** `redirect_uri` 向 Cognito 換 token，換完立刻把網址上的 code 清掉（`history.replaceState`）。
+
+> ⚠️ 第 4 步的驗證不能省。少了它，`login.example.com` 就是一個 open redirect，攻擊者可以把 code 導到自己的網站。
+
+### 操作
+
+1. **Cognito** → **User pools** → **Create user pool**：
+   - 應用程式類型：**Single-page application (SPA)**
+   - 登入方式：Email；**Email 不分大小寫**
+   - **關閉自行註冊（self sign-up）**：使用者一律由租戶管理員或平台開通工具建立（見下方「使用者怎麼建立」）
+   - 方案：**Essentials** 以上（自訂 access token 需要，見第 4 項）
+   - MFA：設為 **Optional**（租戶管理員必須使用，做法見下方注意事項）
+2. **自訂屬性**：新增 `custom:tenant_id`（字串，不可變更 **mutable = false**）。
+   - ⚠️ 在 app client 的屬性權限中，把 `custom:tenant_id` 設為**使用者不可寫入**。否則使用者可以把自己改到別的租戶。
+3. **App client**：
+   - 類型：Public client（**不要有 client secret**，SPA 無法安全保存它）
+   - OAuth：Authorization code grant + **PKCE**；scope：`openid`、`email`
+   - Allowed callback URL：`https://login.example.com/callback`
+   - Allowed sign-out URL：`https://login.example.com/logout`
+   - Token 有效時間：access token **15 分鐘**；refresh token 依需求（例如 8 小時到 30 天）
+   - 開啟 **Token revocation**（預設開啟，請確認）
+4. **讓 access token 帶上 `tenant_id`**：
+   - 加上 **Pre token generation** Lambda trigger（**V2 事件格式**），把 `custom:tenant_id` 加進 access token。
+   - ⚠️ 自訂 **access token** 需要 Cognito 的 **Essentials 或 Plus** 方案；Lite 方案只能自訂 ID token。
+5. **登入稽核**：加上 **Post authentication** Lambda trigger，每次登入成功時寫一筆結構化日誌到 `/veilway/<env>/audit/login`（`sub`、`tenant_id`、時間、來源 IP）。登入失敗與帳號鎖定的紀錄看 CloudTrail 中的 Cognito 事件。
+6. **登入頁網域**：先用 Cognito 預設網域（`<prefix>.auth.ap-east-2.amazoncognito.com`）。自訂網域 `auth.example.com` 要等第 11 步建好根網域的 A 記錄後才能設定。
+
+### 使用者怎麼建立
+
+| 情況 | 誰執行 | 做法 |
+| --- | --- | --- |
+| 開通新租戶時的第一位管理員 | 平台開通工具（第 9 步的 `veilway-provision`） | 在 `tenants` 新增租戶 → Cognito `AdminCreateUser`（帶 `custom:tenant_id`）→ 在 `users` 新增一筆，角色 `tenant_admin` |
+| 租戶內的其他使用者 | 租戶管理員透過 API | API 呼叫 `AdminCreateUser`（`custom:tenant_id` 由後端從 token 取得，不接受前台傳入）→ 在 `users` 新增一筆 |
+
+兩個步驟中途失敗時，要能重跑（以 email 判斷是否已建立），不要留下只有一邊存在的使用者。
+
+### 驗證
+
+- [ ] 建立測試使用者後能從 `acme.example.com` 登入，解開 access token 看得到 `tenant_id`
+- [ ] 使用者無法自行修改 `custom:tenant_id`
+- [ ] 竄改 `state` 中的子網域（例如改成 `evil.com`）時，callback 頁拒絕轉址
+
+### 注意事項
+
+- **租戶管理員的 MFA**：Cognito 的 MFA 是整個 user pool 一起設定，不能只對某些人強制。做法是 pool 設為 Optional，指派 `tenant_admin` 角色時，後端用 `AdminGetUser` 確認對方已設定 MFA，沒有就不給角色；設定後用 `AdminSetUserMFAPreference` 把 MFA 設為必要。
+- 自訂屬性建立後**無法刪除，也無法改名**，命名前請想清楚。
+- API 端應驗證 **access token**，不要拿 ID token 當授權依據。
+- ⚠️ **登出要做三件事**：① 呼叫 Cognito 的 `RevokeToken` 撤銷 refresh token（否則前台可以再換到新的 access token）② 把 access token 的 `jti` 寫進 ElastiCache 的失效名單 ③ 導向 Cognito 的 `/logout`，清掉登入頁的 session。
+
+---
+
+## 第 8 步：後端程式的必要設定（ASP.NET Core）
+
+**目的**：在部署前，把第一階段驗收需要的行為寫進程式。
+
+| 項目 | 做法 |
+| --- | --- |
+| JWT 驗證 | 使用 `Microsoft.AspNetCore.Authentication.JwtBearer`，Authority 設為 Cognito user pool 的網址；驗證簽章、到期時間、`token_use = access`、`client_id` |
+| 租戶解析 | 中介軟體從 `X-Tenant-Host` 標頭取出子網域 → 呼叫 `app.resolve_tenant()` 得到 tenant_id → **必須等於** token 裡的 `tenant_id`，不一致回 403；租戶狀態不是 `active` 也回 403。查詢結果可以在記憶體快取 1～5 分鐘 |
+| RLS 設定 | 照第 5.4 節：明確交易 + `DbTransactionInterceptor` 執行 `set_config('app.tenant_id', …, true)` |
+| 登出 | 照第 7 步的三件事；驗證 token 時一併檢查 ElastiCache 的失效名單 |
+| 限流 | ⚠️ ASP.NET Core 內建的 Rate Limiter **只在單一容器的記憶體裡計數**，多個容器各算各的。請用 ElastiCache 實作分散式限流（自己寫固定視窗計數，或用 `RedisRateLimiting` 這類套件），再接到內建的 Rate Limiter 中介軟體；超過門檻回 **429** 並帶 `Retry-After` |
+| 健康檢查 | `/healthz`：只檢查程式本身是否正常，給 ALB 用；`/readyz`：額外檢查 DB 與快取 |
+| 資料庫密碼 | 用 Npgsql 的 `NpgsqlDataSourceBuilder.UsePeriodicPasswordProvider`，定期從 Secrets Manager 讀取 `veilway/<env>/db/app`。密碼輪替後不用重啟容器 |
+| 其他設定 | 一般設定用環境變數；密碼一律從 Secrets Manager 讀取，不寫進程式碼或映像檔 |
+| 資料庫重試 | 開啟 `EnableRetryOnFailure`，讓 RDS 切換可用區時能自動恢復（搭配第 5.4 節的 execution strategy） |
+| 日誌 | 結構化日誌（JSON）。⚠️ **不記錄** Authorization 標頭、token、密碼、請求內容、authorization code |
+| 服務埠 | 容器監聽 8080，不用 root 身分執行 |
+
+### 注意事項
+
+- ⚠️ 前面經過 CloudFront 和 ALB，程式收到的 Host 會是 `origin-api.example.com`，不是使用者的網址。請在 CloudFront 用 **CloudFront Function** 把使用者的原始 Host 寫進 `X-Tenant-Host` 標頭（見第 11 步），程式從這個標頭解析租戶。
+- 租戶判斷**只信任 token 和這個標頭**，不要信任前台自己傳上來的 tenant_id 參數。
+- 第一階段的程式不放任何呼叫 AI 的程式碼或套件。第二階段的閘道是另一個專案、另一個映像。
+
+---
+
+## 第 9 步：ECR 與 ECS Fargate
+
+**目的**：把後端跑起來，並為第二階段的閘道預留結構。
+
+### 服務切分
+
+| 名稱 | 類型 | 階段 | 用途 | SG | Task role |
+| --- | --- | --- | --- | --- | --- |
+| `veilway-api` | service | 1 | 業務 API、租戶管理、媒體上傳 | `sg-api` | `veilway-api-task` |
+| `veilway-migrate` | 單次 task | 1 | 執行資料庫 migration | `sg-ops` | `veilway-migrate-task` |
+| `veilway-provision` | 單次 task | 1 | 平台開通工具：建立租戶、租戶金鑰、第一位管理員 | `sg-ops` | `veilway-provision-task` |
+| `veilway-gateway` | service | **2** | 隱道閘道：唯一能連到外部模型的元件 | `sg-gateway` | `veilway-gateway-task` |
+
+> **為什麼閘道要獨立**：SG 和 IAM role 都是以 task 為單位設定。閘道如果和業務 API 跑在同一個容器裡，第二階段「只有閘道能連到 PrivateLink endpoint、只有閘道的 role 能呼叫模型」就無法做到。
+
+### 操作
+
+1. **ECR** → **Create repository**：`veilway-api`、`veilway-migrate`（第二階段再加 `veilway-gateway`）：
+   - 開啟 **Scan on push**（推上去時自動掃描弱點）
+   - 開啟 **Tag immutability**（同一個版本標籤不能被覆蓋）
+   - 設定 lifecycle policy，只保留最近 N 個映像
+2. **IAM role**（execution role 和 task role 用途不同，不要搞混）：
+
+| 角色 | 誰使用 | 權限 |
+| --- | --- | --- |
+| Task execution role（共用） | ECS 本身 | 從 ECR 拉映像、寫入 CloudWatch Logs |
+| `veilway-api-task` | API 程式 | 讀取 `veilway/<env>/db/app`、`veilway/<env>/cache`；使用 KMS（Encrypt／Decrypt，不能建立金鑰）；Cognito `AdminCreateUser`、`AdminGetUser`、`AdminSetUserMFAPreference`（限定這個 user pool） |
+| `veilway-migrate-task` | migration | 讀取 `veilway/<env>/db/owner` |
+| `veilway-provision-task` | 開通工具 | 讀取 `veilway/<env>/db/platform`；`kms:CreateKey`、`kms:CreateAlias`；Cognito `AdminCreateUser` |
+| `veilway-gateway-task` | 閘道（第二階段） | 呼叫 Claude Platform on AWS；**只有這個 role 有這個權限** |
+
+3. **ECS** → **Clusters** → **Create cluster** → 名稱 `veilway-<env>`，基礎設施選 **AWS Fargate**，開啟 **Container Insights**。
+   - 同時建立 **Service Connect** 的 namespace（例如 `veilway.internal`），第二階段 API 透過它呼叫閘道，不需要另外架內部 ALB。
+4. **Task definition** → **Create**（`veilway-api`）：
+   - Launch type：Fargate；CPU 架構：**ARM64**（Graviton 較便宜，映像也要用 ARM64 建置）
+   - CPU / 記憶體：dev 先用 0.5 vCPU / 1 GB
+   - 容器埠：8080
+   - 環境變數放一般設定（Secrets 的名稱、user pool ID 等）；密碼由程式從 Secrets Manager 讀取（第 8 步）
+   - 日誌：awslogs，log group `/veilway/<env>/api`
+5. **Task definition**：`veilway-migrate`、`veilway-provision` 同樣方式建立，log group 分別為 `/veilway/<env>/migrate`、`/veilway/<env>/provision`。
+6. **Service** → **Create**（`veilway-api`）：
+   - Desired tasks：dev 1；**prod 至少 2**
+   - 子網：**私有應用子網**；**Public IP：關閉**；SG：`sg-api`
+   - 開啟 **Deployment circuit breaker** 和 **rollback**（部署失敗時自動退回上一版）
+   - Load balancer 在第 10 步建立後再接上（也可以先建 ALB 再建 service）
+
+### 驗證
+
+- [ ] 容器狀態為 RUNNING，CloudWatch Logs 看得到啟動訊息
+- [ ] 容器沒有 public IP
+- [ ] 手動執行一次 `veilway-migrate` task，exit code 為 0
+- [ ] 用 `veilway-provision` 建立測試租戶 `acme` 和它的第一位管理員
+
+### 注意事項
+
+- ⚠️ 映像架構要和 task definition 一致：在 Mac（Apple Silicon）上建的是 ARM64，在一般 CI 機器上預設是 x86。不一致時容器會一直啟動失敗。
+- ECS Exec（進到容器內除錯）在 dev 很方便，prod 建議關閉或嚴格限制。
+
+---
+
+## 第 10 步：ALB
+
+**目的**：把 CloudFront 送來的 API 請求分配給後端容器。
+
+### 操作
+
+1. **EC2** → **Target groups** → **Create**：
+   - Target type：**IP**（Fargate 必須用 IP 類型）
+   - Protocol / Port：HTTP 8080
+   - Health check：`/healthz`
+2. **EC2** → **Load balancers** → **Create Application Load Balancer**：
+   - Scheme：Internet-facing；子網：**公有子網**；SG：`sg-alb`
+   - Listener **HTTPS 443**：使用第 2 步在**台北**申請的憑證
+   - 預設動作：**回傳固定的 403**
+   - 新增一條規則：**標頭 `X-Origin-Verify` 等於 `<一段隨機密鑰>`** 時，才轉送到 target group
+3. 把 ECS service 接上這個 target group。
+4. **DNS**：在 Route 53 新增 `origin-api.example.com`，**A（Alias）** 指向這個 ALB。CloudFront 會用這個名稱連 ALB（第 11 步）。
+5. 把 `<隨機密鑰>` 存進 Secrets Manager，並安排定期更換（更換時 ALB 規則先同時接受新舊兩組值，CloudFront 改完後再移除舊值）。
+
+### 驗證
+
+- [ ] `https://origin-api.example.com` 的憑證有效（瀏覽器不會出現憑證錯誤）
+- [ ] 直接連 ALB 會被拒絕（SG 只允許 CloudFront；就算連得到，沒有密鑰標頭也會拿到 403）
+- [ ] target group 裡的容器顯示 healthy
+
+### 注意事項
+
+- 這樣設定之後，**只有經過 CloudFront 的請求**能到達後端，WAF 的防護才不會被繞過。
+- 另一種做法是 CloudFront 的 **VPC origin**，ALB 可以放在私有子網、完全不對外。請確認台北區域是否支援後再評估。
+
+---
+
+## 第 11 步：S3 前台、CloudFront、WAF 與 DNS
+
+**目的**：讓使用者透過租戶子網域打開前台，並把 `/api/*` 轉給後端。
+
+### 操作
+
+1. **S3 前台 bucket**（台北）
+   - 名稱例如 `veilway-dev-web`；**Block all public access：開啟**；加密：開啟
+2. **WAF** ⚠️ **必須建在 us-east-1，範圍選 CloudFront（Global）**
+   - **WAF & Shield** → **Web ACLs** → **Create** → Resource type：**Amazon CloudFront distributions**
+   - 加入 AWS managed rules：Core rule set、Known bad inputs、IP reputation
+   - 加入 rate-based rule（例如每個 IP 每 5 分鐘的請求上限）
+3. **CloudFront** → **Create distribution**：
+   - **Origin 1**：S3 前台 bucket，使用 **Origin Access Control（OAC）**；建立後依提示把 bucket policy 貼到 S3
+   - **Origin 2**：⚠️ Origin domain 填 **`origin-api.example.com`**（不要填 ALB 的 `*.elb.amazonaws.com`）；Protocol：HTTPS only；加上自訂標頭 `X-Origin-Verify: <隨機密鑰>`
+   - **Behavior `/api/*`** → Origin 2：允許所有 HTTP 方法；Cache policy：**CachingDisabled**；Origin request policy：轉送需要的標頭、查詢字串、Cookie（**不要轉送原始 Host**）
+   - **Default behavior `/*`** → S3：Cache policy：CachingOptimized
+   - **Alternate domain names**：`example.com`、`*.example.com`；憑證：第 2 步在 **us-east-1** 申請的那張
+   - **Web ACL**：選第 2 項建立的 WAF
+   - Viewer protocol policy：**Redirect HTTP to HTTPS**
+4. **CloudFront Functions**（viewer request）：
+   - 綁在 `/api/*`：把使用者的 Host **覆寫**到 `X-Tenant-Host` 標頭（一律覆寫，不能保留使用者自己帶的值）
+   - 綁在 `/*`：把沒有副檔名的路徑改寫成 `/index.html`（SPA 前端路由需要）
+5. **DNS**：**Route 53** → 新增兩筆 **A（Alias）** 記錄，指向這個 CloudFront distribution：
+   - `example.com`
+   - `*.example.com`（`login.example.com` 和所有租戶子網域都由這筆涵蓋）
+6. **Cognito 自訂網域**（根網域的 A 記錄建好後才能做）：
+   - **Cognito** → user pool → **Domain** → 自訂網域 `auth.example.com`，選 us-east-1 的憑證。
+   - 依畫面提示，在 Route 53 新增 `auth.example.com` 的 Alias 記錄。明確的記錄會優先於萬用字元記錄。
+   - 前台的設定改用 `auth.example.com`。
+7. **部署前台**：`aws s3 sync` 上傳建置好的檔案；`index.html` 上傳時設定 `Cache-Control: no-cache`，帶雜湊值檔名的 JS、CSS 設定長期快取 → 對 CloudFront 執行 invalidation `/index.html`。
+
+### 驗證
+
+- [ ] `https://acme.example.com` 可以打開前台，重新整理任何頁面都不會出現 404
+- [ ] `https://acme.example.com/api/healthz` 會回應，而且後端收到的 `X-Tenant-Host` 是 `acme.example.com`
+- [ ] 自己在請求中帶 `X-Tenant-Host: beta.example.com`，後端收到的仍然是 `acme.example.com`
+- [ ] 直接開 S3 bucket 的網址會被拒絕
+- [ ] `https://auth.example.com` 顯示 Cognito 登入頁
+
+### 注意事項
+
+- ⚠️ **CloudFront 會驗證 origin 的憑證**：不轉送原始 Host 時，CloudFront 用 origin domain 的名稱連線並比對憑證。origin 填 ALB 的預設網址時，和 `*.example.com` 的憑證對不上，會一直回 502。
+- ⚠️ **不要用 CloudFront 的「自訂錯誤回應」（把 403/404 改成 index.html）來處理 SPA 路由**。它對整個 distribution 生效，連 `/api/*` 的 404 也會被換成首頁，API 的錯誤會變得很難除錯。請用上面第 4 項的 CloudFront Function。
+- CloudFront 設定變更需要幾分鐘才會在全球生效。
+
+---
+
+## 第 12 步：CloudWatch 監控與告警
+
+**目的**：出問題時第一時間知道。
+
+### 操作
+
+1. **Log groups**：`/veilway/<env>/api`、`/migrate`、`/provision`、`/audit/login` 等，設定保留天數（dev 14 天；prod 依稽核規定，登入稽核建議至少 1 年），並用 `veilway-logs` 加密。
+2. **告警**（**CloudWatch** → **Alarms**，通知送到 SNS 主題 → Email 或 Slack）：
+
+| 告警 | 條件範例 |
+| --- | --- |
+| ALB 5xx 偏多 | 5 分鐘內 5xx 超過一定比例 |
+| 後端不健康 | target group 的 healthy 數量 < 期望數量 |
+| ECS | CPU 或記憶體持續 > 80% |
+| RDS | CPU > 80%、可用儲存空間 < 20%、連線數接近上限 |
+| ElastiCache | 記憶體使用率 > 80%、evictions > 0 |
+| 快取連線失敗 | 程式記錄的快取錯誤數 > 0（第 6 步的 fail-open 正在發生） |
+| WAF | 被擋下的請求突然大量增加 |
+| 登入 | 登入失敗次數突然大量增加 |
+
+3. **Dashboard**：把上面的指標放在同一個畫面。
+
+### 注意事項
+
+- ⚠️ 定期用 **Logs Insights** 抽查日誌，確認沒有 token、密碼或個資（第一階段的驗收項目之一）。
+- 日誌保留天數不設定的話，預設是**永久保存**，費用會一直累積。
+
+---
+
+## 第 13 步：CI/CD（GitHub Actions）
+
+**目的**：程式推上 GitHub 後自動部署，不需要手動上傳。
+
+### 操作
+
+1. **讓 GitHub 不用金鑰就能存取 AWS（OIDC）**
+   - **IAM** → **Identity providers** → **Add provider** → OpenID Connect → `https://token.actions.githubusercontent.com`，Audience：`sts.amazonaws.com`
+   - 建立 IAM role，信任條件限制在**特定 repo 與分支**（例如只有 `main` 可以部署到 staging）
+2. **後端流程**：測試（含跨租戶測試、RLS 檢查）→ 建置 ARM64 映像 → 推到 ECR（標籤用 commit SHA）→ **執行 migration** → 更新 ECS task definition → 部署 service
+3. **資料庫 migration** ⚠️ GitHub 的 runner 在 VPC 外面，**連不到 RDS**：
+   - 把 migration 打包成 `veilway-migrate` 映像。
+   - 部署流程用 `aws ecs run-task` 在私有應用子網啟動它（SG `sg-ops`），等待結束，**exit code 不是 0 就中止部署**。
+   - 在新版程式上線前完成。
+4. **前台流程**：測試 → 建置 → `s3 sync` → CloudFront invalidation
+5. **環境保護**：在 GitHub 的 Environments 設定 prod 需要人工核准才能部署
+
+### 注意事項
+
+- ⚠️ **不要**把 AWS access key 存在 GitHub Secrets 裡，一律用 OIDC。
+- ⚠️ IAM role 的信任條件一定要限制 repo 和分支，否則任何 GitHub repo 都可能拿到你的 AWS 權限。
+- 部署用的 role 只需要 `ecs:RunTask`、`ecs:DescribeTasks`、`iam:PassRole`（限定那幾個 task role）等權限，不需要資料庫密碼。
+- migration 要寫成「新舊版程式都能運作」（例如先加欄位、之後才刪欄位），避免部署途中出錯。
+
+---
+
+## 第 14 步：IaC 化與重建驗證
+
+**目的**：把第 2 到 13 步的設定寫成 CDK，確保環境可以一鍵重建。
+
+### 操作
+
+1. 建立 CDK（C#）專案，按層拆成幾個 stack：
+
+| Stack | 內容 | 區域 |
+| --- | --- | --- |
+| `GlobalStack` | us-east-1 的 ACM 憑證（CloudFront、Cognito 自訂網域共用）、CloudFront 用的 WAF | us-east-1 |
+| `NetworkStack` | VPC、子網、NAT、VPC endpoint、SG（含第二階段的 `sg-gateway` 預留開關） | 台北 |
+| `DataStack` | KMS、RDS、ElastiCache、Secrets | 台北 |
+| `AuthStack` | Cognito、Pre token generation 與 Post authentication Lambda | 台北 |
+| `AppStack` | ECR、ECS cluster、Service Connect namespace、ALB、`veilway-api` service、`veilway-migrate` 與 `veilway-provision` task | 台北 |
+| `EdgeStack` | S3 前台、CloudFront、DNS、Cognito 自訂網域 | 台北（引用 us-east-1 的資源） |
+| `GatewayStack` | **第二階段**：`veilway-gateway` service、task role、PrivateLink endpoint、出口管控 | 台北 |
+
+2. 每個 ECS 服務寫成同一個 construct（映像、task role、SG、log group、desired count），第二階段新增閘道時直接套用。
+3. 環境差異（AZ 數量、容器數量、Multi-AZ、刪除保護、網域）寫成設定，不要寫死在程式碼裡。
+4. 用 CDK 部署 dev 與 staging，跑完第 15 步的驗收清單。
+5. **重建演練**：用 CDK 刪除 dev，再用 CDK 重建一次，確認可以完全重現（包含執行 migration 與 `veilway-provision` 建立測試租戶）。
+
+### 注意事項
+
+- ⚠️ 有狀態的資源（RDS、S3、KMS）在 CDK 中要設定 **RemovalPolicy.RETAIN**（prod）並開啟刪除保護，避免一次 `cdk destroy` 就把資料刪光。dev 可以設成 DESTROY，重建演練才做得起來。
+- 跨區域引用（台北的 stack 用到 us-east-1 的憑證）要開啟 CDK 的 `crossRegionReferences`。
+- 第 5.2 節的建立帳號 SQL 不屬於 migration（需要主帳號），請寫成一個由 CDK custom resource 或 `veilway-provision` 在建立環境時執行一次的初始化步驟，重建時才不用手動補。
+- 手動在主控台改過的設定，下次 CDK 部署時會被覆蓋。導入 IaC 後就不要再手動修改。
+
+---
+
+## 第 15 步：第一階段驗收
+
+對應〈Veilway三階段執行計畫.md〉的驗收標準：
+
+| # | 驗收項目 | 怎麼測 |
+| --- | --- | --- |
+| 1 | 使用者從租戶子網域登入，前台呼叫 API 成功 | 用 `acme.example.com` 登入，呼叫一支需要授權的 API |
+| 2 | 拿 B 租戶的 token 到 A 租戶的子網域會被拒絕 | 自動化測試，預期 403 |
+| 3 | A 租戶讀不到 B 租戶的資料 | 自動化測試：直接用 `veilway_app` 帳號查資料庫，以及透過 API 查詢，兩種都要測；包含「連線被重用」的情境 |
+| 4 | 登出後舊 token 立即失效 | 登出後再用舊 access token 呼叫 API，預期 401；用舊 refresh token 換新 token，預期失敗 |
+| 5 | 超過限流門檻回 429 | 用腳本短時間大量呼叫，**請求分散到不同容器**時也要觸發 |
+| 6 | RDS、後端從公網連不到 | 從外部嘗試連線 RDS 端點和 ALB 直連網址 |
+| 7 | 停掉一個容器或切換 RDS 可用區時，服務自動恢復（prod／staging） | 手動停止一個 task：不出現錯誤。對 RDS 執行 **Reboot with failover**：切換期間（通常 1～2 分鐘）可能有短暫錯誤，**之後不需要人工介入即自動恢復**，期間沒有資料遺失 |
+| 8 | 環境可以用 IaC 重建 | 第 14 步的重建演練 |
+| 9 | 日誌中沒有 token、密碼等敏感資訊 | Logs Insights 搜尋 `Bearer`、`password`、`eyJ`、`code=` 等關鍵字 |
+| 10 | 登入有稽核紀錄 | 登入後在 `/veilway/<env>/audit/login` 查得到這次登入 |
+| 11 | 每張帶 `tenant_id` 的資料表都開啟了 RLS | CI 的 RLS 檢查通過 |
+
+> 驗收第 7 項的「服務不中斷」改成「自動恢復」：RDS 切換可用區時連線一定會斷，能做到的是程式自動重試、不需人工處理。若要縮短中斷時間，評估 Multi-AZ DB cluster。
+
+---
+
+## 附錄 A：常見陷阱總表
+
+| 陷阱 | 後果 | 對策（步驟） |
+| --- | --- | --- |
+| 台北區域沒有手動開啟 | 所有資源都建不起來 | 第 1 步 |
+| 手動建的環境想直接轉成 IaC | 無法用 `cdk destroy` 刪除，重建演練做不了 | 手動練習放 sandbox 帳號（怎麼使用這份手冊） |
+| CloudFront、Cognito 自訂網域的憑證或 WAF 建在台北 | 設定畫面選不到 | 都要建在 us-east-1（第 2、11 步） |
+| 萬用憑證沒包含根網域 | `example.com` 出現憑證錯誤 | 申請時同時列出兩個名稱（第 2 步） |
+| pgvector 建在 `postgres` 資料庫 | `veilway` 資料庫裡沒有 vector 型別 | 連到 `veilway` 後再建立擴充（第 5.2 步） |
+| 應用程式用資料表擁有者連線 | RLS 失效，跨租戶資料外洩 | 用 `veilway_app` 並加 `FORCE ROW LEVEL SECURITY`（第 5 步） |
+| 用 `SET` 設定租戶 | 連線池造成租戶設定殘留 | 用 `set_config(..., true)`（第 5.4 步） |
+| RLS 政策沒有 `nullif` | 連線被重用時查詢出錯 | 用 `current_tenant_id()`（第 5.3 步） |
+| 在開啟連線時設定交易範圍的租戶 | 下一句查詢就沒有租戶 | 用明確交易 + 交易攔截器（第 5.4 步） |
+| 使用者可以修改 `custom:tenant_id` | 使用者把自己改到別的租戶 | 設為不可寫入（第 7 步） |
+| callback 頁轉址沒驗證子網域 | open redirect，authorization code 外洩 | 驗證格式與保留名稱（第 7 步） |
+| 登出只撤銷 access token | 用 refresh token 又拿到新 token | 呼叫 `RevokeToken`（第 7 步） |
+| 用內建 Rate Limiter 就以為是全域限流 | 每個容器各算各的，門檻形同放大 | 用 ElastiCache 做分散式計數（第 8 步） |
+| CloudFront origin 填 ALB 預設網址 | 憑證不符，一直回 502 | 用 `origin-api.example.com`（第 10、11 步） |
+| 用自訂錯誤回應處理 SPA 路由 | API 的 404 也變成首頁 | 用 CloudFront Function（第 11 步） |
+| ALB 可以被直接存取 | WAF 被繞過 | SG 限制 CloudFront + 密鑰標頭（第 10 步） |
+| 閘道和 API 跑在同一個容器 | 第二階段的出口鎖定無法做到 | 閘道拆成獨立 service（第 9 步） |
+| 映像架構與 task definition 不一致 | 容器一直啟動失敗 | 統一用 ARM64（第 9 步） |
+| GitHub Actions 直接連 RDS 跑 migration | 連不到私有子網 | 用 ECS run-task（第 13 步） |
+| GitHub 存放 AWS 長期金鑰 | 金鑰外洩風險 | 改用 OIDC（第 13 步） |
+| 日誌沒設保留天數 | 費用持續累積 | 每個 log group 都設定（第 12 步） |
+
+## 附錄 B：費用注意
+
+dev 環境放著不用也會持續計費的項目：**NAT Gateway、RDS、ElastiCache、ALB、Fargate 容器、VPC interface endpoint**（每個 endpoint 依可用區按小時計費）、WAF 的規則與請求數、Cognito Essentials 方案（依每月活躍使用者計費）。
+
+省錢做法：
+
+- dev 用最小規格、單 AZ。
+- 下班或週末用排程把 dev 的 Fargate desired count 調成 0、暫停 RDS（RDS 暫停最多 7 天後會自動啟動）。
+- sandbox 帳號練習完就清空。
+- 用 Budgets 告警盯緊每月花費。
+
+正式的費用估算，請用 AWS Pricing Calculator 依實際規格試算。
+
+## 附錄 C：交接給第二階段的項目
+
+第一階段刻意不做、但已經預留的項目：
+
+| 項目 | 第一階段的狀態 | 第二階段要做 |
+| --- | --- | --- |
+| 隱道閘道 | IaC 有 `GatewayStack` 的位置、`sg-gateway` 預留、Service Connect namespace 已建立 | 建立 `veilway-gateway` service 與 task role；API 透過 Service Connect 呼叫閘道 |
+| 出口管控 | 應用子網經 NAT 可以完整對外（已知限制） | egress proxy 或 Network Firewall 加網域 allowlist，**不放行任何 AI 服務的網域**；只有閘道能連 PrivateLink endpoint |
+| 租戶金鑰 | 做法已定案、開通工具能建立 | 對照表用租戶金鑰加密 |
+| 方案與額度 | `plans` 資料表已建立 | 閘道計量寫入、ElastiCache 做即時額度 |
+
+---
+
+## 參考
+
+- [Amazon Cognito 已在台北區域上線（2026-03）](https://aws.amazon.com/about-aws/whats-new/2026/03/cognito-taipei-and-new-zealand-regions)
+- [AWS 台北區域開放公告](https://aws.amazon.com/blogs/aws/now-open-aws-asia-pacific-taipei-region/)
+- [啟用或停用 AWS 區域（opt-in regions）](https://docs.aws.amazon.com/accounts/latest/reference/manage-acct-regions.html)

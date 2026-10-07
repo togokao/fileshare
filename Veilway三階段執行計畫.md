@@ -1,6 +1,6 @@
 # Veilway 三階段執行計畫
 
-架構說明見〈Veilway2.md〉。
+架構說明見〈Veilway2.md〉。第一階段的操作步驟見〈Veilway第一階段操作手冊.md〉。
 
 ## 原則
 
@@ -50,7 +50,7 @@ AI 相關功能、檔案上傳、非同步處理。
 ### 風險
 
 - Row-Level Security 和 ORM（例如 EF Core）的整合方式要先試做驗證
-- 正式環境依原圖用 ECS Fargate（至少 2 個容器）與多可用區 RDS；MVP 可先用單台 EC2、單可用區省成本，但 IaC 要保留切換的設定，不要寫死
+- 正式環境依原圖用 ECS Fargate（至少 2 個容器）與多可用區 RDS；dev 為了省成本用 1 個 Fargate 容器、單可用區 RDS、1 個 NAT（仍保留 ALB），環境差異寫成 IaC 的設定，不要寫死
 
 ---
 
@@ -60,7 +60,9 @@ AI 相關功能、檔案上傳、非同步處理。
 
 | 類別 | 項目 |
 | --- | --- |
+| 閘道服務 | 隱道閘道是**獨立的 ECS service**（自己的 security group 與 task role），業務 API 透過 Service Connect 呼叫它；第一階段已預留結構 |
 | 出口 | 建立 Claude Platform on AWS 的 PrivateLink VPC endpoint（台北區域）；endpoint 的 security group 和 endpoint policy 只允許閘道；呼叫權限只授權給閘道的 IAM role；設定 workspace ID |
+| 出口管控 | 應用子網的其他對外連線改走 egress proxy 或 Network Firewall，加網域 allowlist，**不放行任何 AI 服務的網域**（第一階段經 NAT 完整對外，是已知、暫時的狀態） |
 | 推論位置 | workspace 層級設定 `default_inference_geo`、`allowed_inference_geos`；回覆中的 `usage.inference_geo` 寫進 `AI_REQUEST_LOG` |
 | 閘道管線 | `IChatClient` + `DelegatingChatClient`：遮蔽 → 檢查點 → 送出 → 還原 → 計量 |
 | 遮蔽器 | 正規表示式 + 租戶字典（字典的管理介面和匯入功能）。NER 列為本階段後段項目 |
@@ -147,6 +149,6 @@ Tool calling、RAG、檔案上傳。
 
 1. 用 CDK 還是 Terraform
 2. 網域名稱與租戶子網域的命名規則（萬用憑證要先申請）
-3. MVP 是否先用單台 EC2、單可用區 RDS 省成本（正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS）
+3. ~~MVP 是否先用單台 EC2、單可用區 RDS 省成本~~ 已定案：dev 用 1 個 Fargate 容器、單可用區 RDS；正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS（見〈Veilway第一階段操作手冊.md〉第 0 步）
 4. 開通 Claude Platform on AWS：AWS Marketplace 訂閱、在台北區域建立 workspace，並決定預設 `inference_geo`（`global` 或 `us`）與是否申請 ZDR
 5. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前，嵌入模型也要提早選定

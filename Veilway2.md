@@ -7,6 +7,8 @@
 整套系統跟一般 SaaS 最大的不同在於：所有 AI 請求都走同一條道。送出前，平台先把個資換成代號；回覆回來後，再換回真名。外部模型從頭到尾只看得到代號，而代號和真名的對照表從不離開平台。
 
 > 本版整合了 v1 架構圖（依據「AI-前後台架構 總結」，2026-10-06）與後續討論：出口管控、模型接入方式、對照表範圍、檢查點處理規則、三階段建置順序。系統元件以原架構圖為準（含 ElastiCache、pgvector、租戶子網域等）。
+>
+> **2026-10-07 更新**：隱道閘道從後端容器內的模組，改為**獨立的 ECS service**（自己的 security group 與 IAM role），出口鎖定才能以網路和權限強制做到（見第 6 節）。
 
 ---
 
@@ -19,13 +21,18 @@ flowchart LR
   U[iPad／瀏覽器] -- HTTPS --> CF[CloudFront + WAF<br/>單一網域 · 萬用憑證（租戶子網域）]
   CF -- "/*" --> S3W[S3 前台<br/>SPA 靜態檔]
   CF -- "/api/*" --> ALB[ALB<br/>只負責分流]
-  subgraph BE[ASP.NET Core 後端 · ECS Fargate（至少 2 個容器）]
-    API[業務 API<br/>C# Controller]
-    TM[租戶管理<br/>方案 · 額度 · 計量]
-    MU[媒體上傳<br/>簽發 S3 直傳網址]
-    GW[隱道閘道<br/>遮蔽 · 檢查 · 還原]
+  subgraph BE[ASP.NET Core 後端 · ECS Fargate · 私有子網]
+    subgraph APISVC[API service（至少 2 個容器）]
+      API[業務 API<br/>C# Controller]
+      TM[租戶管理<br/>方案 · 額度 · 計量]
+      MU[媒體上傳<br/>簽發 S3 直傳網址]
+    end
+    subgraph GWSVC[閘道 service（獨立 SG 與 IAM role）]
+      GW[隱道閘道<br/>遮蔽 · 檢查 · 還原]
+    end
   end
   ALB --> API
+  API -- Service Connect --> GW
   subgraph DATA[資料層 · 讀寫依 TENANT_ID 強制隔離（RLS）]
     RDS[(RDS PostgreSQL<br/>pgvector · 多可用區)]
     EC[(ElastiCache<br/>Session · 限流)]
@@ -47,8 +54,8 @@ flowchart LR
 | --- | --- | --- |
 | 邊緣 | CloudFront + WAF | 單一網域、萬用憑證，每個租戶一個子網域（例如 `acme.example.com`）；前台快取、TLS、基本防護。`/*` 到 S3 前台，`/api/*` 到 ALB |
 | 前台 | S3 靜態網站（SPA） | 只透過 CloudFront 存取（OAC），bucket 不公開 |
-| 分流 | ALB | 只負責分流到後端容器。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2 |
-| 後端 | ASP.NET Core · ECS Fargate | 正式環境**至少 2 個容器**（跨可用區），跑在私有子網。內含四個模組：業務 API（C# Controller）、租戶管理、媒體上傳、隱道閘道 |
+| 分流 | ALB | 只負責分流到後端容器。各環境都保留 ALB；dev 為了省成本，API service 只跑 1 個容器、RDS 用單可用區（見〈Veilway第一階段操作手冊.md〉第 0 步） |
+| 後端 | ASP.NET Core · ECS Fargate | 跑在私有子網，分成兩個 service：**API service**（業務 API、租戶管理、媒體上傳；正式環境**至少 2 個容器**，跨可用區）與 **閘道 service**（隱道閘道）。API 透過 ECS Service Connect 呼叫閘道 |
 | 租戶管理 | 後端模組 | 租戶的方案、額度、計量；AI token 用量與檔案用量都記在這裡 |
 | 媒體上傳 | 後端模組 | 簽發 S3 直傳網址（presigned URL），檔案不經過後端 |
 | 身分 | Cognito | 簽發 JWT，token 內帶 `tenant_id`。API 要核對子網域對應的租戶和 token 裡的 `tenant_id` 一致 |
@@ -56,7 +63,7 @@ flowchart LR
 | 快取 | ElastiCache | **Session**（登入狀態、登出後讓 token 失效）與**限流**（每個租戶、每個使用者的請求頻率和 AI 額度）。要開啟傳輸中與靜態加密；**不放對照表或任何真名** |
 | 檔案 | S3（私有） | 使用者上傳的原始檔，**依租戶分 prefix**（`tenants/{tenant_id}/…`），以 SSE-KMS 加密；IAM 與 presigned URL 都限制在該租戶的 prefix |
 | 非同步 | SQS + Worker | 長任務與影音處理：文件解析、OCR、錄音轉文字、大檔遮蔽、批次任務 |
-| AI 出口 | 隱道閘道 | 後端內**唯一**能連到平台外模型的元件 |
+| AI 出口 | 隱道閘道（獨立 service） | **唯一**能連到平台外模型的元件。有自己的 security group 與 IAM role，正式環境同樣至少 2 個容器 |
 | 橫向服務 | Secrets Manager、KMS、CloudWatch | 金鑰、加密、監控 |
 
 **平台元件**全部在台北區域內。模型推論在 Anthropic 的資料中心（美國或全球，見第 7 節），**跨出平台的只有隱道閘道送出、經過遮蔽的內容**。
@@ -79,7 +86,7 @@ flowchart LR
 
 | 位置 | 中文名 | 英文名 | 做法 |
 | --- | --- | --- | --- |
-| 後端內的 AI Gateway | 隱道閘道 | Veilway Gateway | 統一介面 `IChatClient`（Microsoft.Extensions.AI）。遮蔽、檢查、還原、計量各寫成一層 `DelegatingChatClient`，串成管線；換模型供應商時這幾層不必修改 |
+| 獨立的 ECS service | 隱道閘道 | Veilway Gateway | 統一介面 `IChatClient`（Microsoft.Extensions.AI）。遮蔽、檢查、還原、計量各寫成一層 `DelegatingChatClient`，串成管線；換模型供應商時這幾層不必修改 |
 | 去程第一步 | 遮蔽器 | Veil Masker | 三層：① 正規表示式（身分證、手機、市話、Email、卡號、統編）② 租戶字典（客戶名單、員工名冊）③ CPU 可跑的繁中 NER（人名、地址、公司名）。另外做別名展開：王小明 → 小明、王先生、王董 |
 | 平台資料庫 | 對照表 | Veil Map | 真名與代號的對應。存在 RDS，用租戶的 KMS key 加密，範圍規則見第 4 節 |
 | 跨越邊界前 | 檢查點 | Veil Check | 送出前的最後一關，規則見第 5 節 |
@@ -134,10 +141,11 @@ flowchart LR
 ## 6. 出口管控：「唯一出口」用網路設定強制做到
 
 - 後端放在私有子網，不給一般的對外網路。
+- **閘道是獨立的 ECS service**：security group 和 IAM role 都是以 ECS task 為單位設定，閘道如果和業務 API 跑在同一個容器裡，下面的網路鎖定和權限鎖定就無法區分誰是閘道。業務 API 透過 ECS Service Connect 呼叫閘道，本身沒有任何呼叫模型的程式碼或權限。
 - 閘道透過 **AWS PrivateLink（VPC endpoint）** 連到 Claude Platform on AWS（官方文件已確認支援），流量不經過公網，AI 這條路不需要 NAT 或 egress proxy。
 - **網路鎖定**：VPC endpoint 的 security group 只允許閘道的 security group 連入；endpoint policy 只允許閘道的 IAM role。
 - **權限鎖定**：Claude Platform on AWS 用 IAM／SigV4 驗證，呼叫權限只授權給閘道的 IAM role。其他服務就算裝了 SDK，網路上連不到，也沒有權限。
-- 需要其他對外連線時（例如寄信），走 egress proxy 加網域 allowlist，而且 allowlist **不放行**任何 AI 服務的網域。
+- 需要其他對外連線時（例如寄信），走 egress proxy 或 AWS Network Firewall 加網域 allowlist，而且 allowlist **不放行**任何 AI 服務的網域。這項在**第二階段**和閘道 service 一起上線；第一階段應用子網經 NAT 可以完整對外，是已知、暫時的狀態，在那之前任何環境都不放 AI 服務的 API key。
 - **日誌也是外洩路徑**：應用程式日誌和例外訊息不能印出原始 prompt，CloudWatch 要定期抽查。
 
 ---
