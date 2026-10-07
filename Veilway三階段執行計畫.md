@@ -25,10 +25,12 @@
 | --- | --- |
 | 網路 | VPC（公有、私有子網，跨 2 個可用區）、Security Group 規劃。私有子網預設不對外，需要時才開 VPC endpoint |
 | IaC 與 CI/CD | CDK 或 Terraform；前台與後端各自的部署流程；dev、staging 兩套環境 |
-| 邊緣與前台 | CloudFront + WAF、S3 前台（OAC，bucket 不公開）、網域與 ACM 憑證 |
-| 分流與後端 | ALB → C# API（ECS Fargate 或 EC2），健康檢查、記錄 log 的方式 |
-| 身分 | Cognito user pool；JWT 內帶 `tenant_id`；API 端驗證 token 並取出租戶 |
-| 資料庫 | RDS PostgreSQL（私有子網、加密）；資料表遷移工具；基本資料表：租戶、使用者、角色；**每張表都帶 `tenant_id`，並啟用 Row-Level Security** |
+| 邊緣與前台 | CloudFront + WAF、S3 前台 SPA（OAC，bucket 不公開）；單一網域加**萬用憑證**（ACM），每個租戶一個子網域 |
+| 分流與後端 | ALB → ASP.NET Core（ECS Fargate，正式環境至少 2 個容器、跨可用區），健康檢查、記錄 log 的方式 |
+| 身分 | Cognito user pool；JWT 內帶 `tenant_id`；API 端驗證 token，並核對子網域對應的租戶與 token 一致 |
+| 租戶管理 | 租戶建立與子網域對應；方案與額度的資料結構（計量在第二階段接上） |
+| 資料庫 | RDS PostgreSQL（私有子網、加密，正式環境**多可用區**）；資料表遷移工具；基本資料表：租戶、使用者、角色；**每張表都帶 `tenant_id`，並啟用 Row-Level Security**；先啟用 **pgvector** 擴充（第三階段 RAG 才用） |
+| 快取 | ElastiCache（加密）：Session（登入狀態、登出後讓 token 失效）與 API 限流 |
 | 共用服務 | Secrets Manager（DB 連線資訊）、每個租戶一把 KMS key 的機制、CloudWatch log 與告警 |
 
 ### 不做
@@ -37,16 +39,18 @@ AI 相關功能、檔案上傳、非同步處理。
 
 ### 驗收標準
 
-- [ ] 使用者能從瀏覽器登入，前台呼叫 API 成功
+- [ ] 使用者能從租戶子網域登入，前台呼叫 API 成功；用 A 租戶的子網域拿 B 租戶的 token 會被拒絕
 - [ ] API 能依 JWT 中的租戶讀寫 RDS；用 A 租戶的 token **讀不到** B 租戶的資料（有自動化測試）
 - [ ] RDS 和後端都不能從公網直接連到
+- [ ] 登出後，舊 token 立即失效（ElastiCache Session）；超過限流門檻的請求回 429
+- [ ] 停掉一個容器或切換 RDS 可用區時，服務不中斷（正式環境）
 - [ ] 刪掉整個環境後，能用 IaC 重建出來
 - [ ] 日誌中沒有 token、密碼等敏感資訊
 
 ### 風險
 
 - Row-Level Security 和 ORM（例如 EF Core）的整合方式要先試做驗證
-- 要在 ECS Fargate 和 EC2 之間做決定：MVP 用單台 EC2 比較便宜，Fargate 比較好維運
+- 正式環境依原圖用 ECS Fargate（至少 2 個容器）與多可用區 RDS；MVP 可先用單台 EC2、單可用區省成本，但 IaC 要保留切換的設定，不要寫死
 
 ---
 
@@ -62,7 +66,8 @@ AI 相關功能、檔案上傳、非同步處理。
 | 遮蔽器 | 正規表示式 + 租戶字典（字典的管理介面和匯入功能）。NER 列為本階段後段項目 |
 | 檢查點 | 對照表原值比對、正規表示式重掃、字典比對；依 Veilway2.md 第 5 節處理，故障時 fail-closed |
 | 還原器 | 能容錯的代號比對；串流緩衝區 |
-| 資料表（RDS） | 對話、訊息、對照表（每個對話一張，加 TTL，以 KMS 加密）、`AI_REQUEST_LOG`（只存遮蔽後的內容）、攔截紀錄、計量 |
+| 資料表（RDS） | 對話、訊息、對照表（每個對話一張，加 TTL，以 KMS 加密）、`AI_REQUEST_LOG`（只存遮蔽後的內容）、攔截紀錄 |
+| 租戶管理：計量與額度 | 閘道的計量層把每次的 token 用量寫進租戶管理；ElastiCache 做即時的 AI 額度與頻率限制，超過方案額度就拒絕或降級 |
 | 前台 | 對話介面（串流顯示）、對話列表、檢查點攔截時的提示與確認畫面 |
 | Ollama | 開發和測試用的替身；驗證隱道連接器只改 endpoint 就能切換模型 |
 | 測試集 v1 | 格式類個資 + 字典命中案例，接進 CI |
@@ -83,7 +88,8 @@ Tool calling、RAG、檔案上傳。
 - [ ] 滲透測試：除了閘道之外，沒有任何服務能連到平台外的模型
 - [ ] 測試集上，格式類個資的召回率達 99.9% 以上，字典類 100%
 - [ ] 檢查點故障時，請求會被拒絕，不會放行
-- [ ] 每個租戶的 token 用量能夠查詢
+- [ ] 每個租戶的 token 用量能夠查詢；超過方案額度時會被擋下
+- [ ] ElastiCache 中沒有對照表或任何真名（抽查）
 
 ### 風險
 
@@ -100,17 +106,17 @@ Tool calling、RAG、檔案上傳。
 
 | 類別 | 項目 |
 | --- | --- |
-| 上傳 | 前台用 presigned URL 直接上傳到 S3（私有、SSE-KMS）；限制檔案大小與類型；病毒掃描 |
+| 上傳 | 媒體上傳模組簽發 presigned URL，前台直接上傳到 S3（私有、SSE-KMS）；**依租戶分 prefix**（`tenants/{tenant_id}/…`）；限制檔案大小與類型；病毒掃描 |
 | 非同步 | 上傳完成後，事件送進 SQS，由 Worker 處理；加上 DLQ（處理失敗的工作）和重試機制 |
 | Worker | 抽出文字（PDF、Office 檔）→ 遮蔽 → 存進 RDS 或 S3。Worker 呼叫 AI 也要經過隱道閘道 |
 | 工作狀態 | 工作狀態表；前台顯示處理進度（輪詢或推播） |
 | 文件問答 | 「針對這份文件提問」；大型文件切段處理 |
-| 影像與錄音 | OCR 後走文字流程；錄音先轉成文字。可依時程分批上線 |
+| 影音處理 | Worker 處理影像與錄音：影像 OCR 後走文字流程，錄音先轉成文字再走文字流程。可依時程分批上線 |
 | 檔案生命週期 | S3 lifecycle 規則；刪除對話或租戶時，連同檔案和對照表一起清除 |
 
 ### 可選項目（依第一批租戶的需求決定）
 
-- RAG：向量庫加上租戶範圍的對照表
+- RAG：向量存在 RDS 的 pgvector（第一階段已啟用擴充），加上租戶範圍的對照表；嵌入模型建議用平台內 CPU 模型，避免多一條對外路徑
 - Tool calling：參數還原 → 在平台內執行 → 結果重新遮蔽
 - 隱道連接器正式接上租戶機房的模型，並套用路由政策（有特殊合規要求的租戶，建議自建地端 AI，理由見 Veilway2.md 第 7.2 節）
 - 用 Batch API 處理大量文件（非即時工作半價）
@@ -121,7 +127,7 @@ Tool calling、RAG、檔案上傳。
 - [ ] Worker 失敗的工作會進入 DLQ 並觸發告警，不會遺失
 - [ ] 送給模型的文件內容經過遮蔽（抽查 `AI_REQUEST_LOG`）
 - [ ] 刪除對話後，S3 檔案、對照表、相關紀錄都一併清除
-- [ ] A 租戶無法取得 B 租戶的檔案（presigned URL 有綁定租戶和有效期限）
+- [ ] A 租戶無法取得 B 租戶的檔案（presigned URL 限制在該租戶的 prefix，並有有效期限）
 
 ---
 
@@ -132,7 +138,7 @@ Tool calling、RAG、檔案上傳。
 | 測試集 | — | v1 格式類 + 字典，加上 NER 時擴充為 v2 | 加入文件和 OCR 案例 |
 | 稽核 | 登入紀錄 | AI 請求、攔截紀錄 | 檔案存取紀錄 |
 | 監控 | 基本告警 | 遮蔽與攔截的統計、模型延遲 | 佇列堆積、Worker 錯誤率 |
-| 成本 | 基礎設施預算告警 | 每個租戶的 token 計量 | 儲存與處理量 |
+| 成本 | 基礎設施預算告警 | 每個租戶的 token 計量與額度 | 儲存與處理量 |
 | 安全檢查 | 跨租戶存取測試 | 出口滲透測試 | 檔案權限測試 |
 
 ---
@@ -140,6 +146,7 @@ Tool calling、RAG、檔案上傳。
 ## 第一階段開工前要先決定的事
 
 1. 用 CDK 還是 Terraform
-2. 後端跑在 ECS Fargate 還是 EC2
-3. 開通 Claude Platform on AWS：AWS Marketplace 訂閱、在台北區域建立 workspace，並決定預設 `inference_geo`（`global` 或 `us`）與是否申請 ZDR
-4. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前
+2. 網域名稱與租戶子網域的命名規則（萬用憑證要先申請）
+3. MVP 是否先用單台 EC2、單可用區 RDS 省成本（正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS）
+4. 開通 Claude Platform on AWS：AWS Marketplace 訂閱、在台北區域建立 workspace，並決定預設 `inference_geo`（`global` 或 `us`）與是否申請 ZDR
+5. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前，嵌入模型也要提早選定

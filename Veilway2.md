@@ -6,40 +6,56 @@
 
 整套系統跟一般 SaaS 最大的不同在於：所有 AI 請求都走同一條道。送出前，平台先把個資換成代號；回覆回來後，再換回真名。外部模型從頭到尾只看得到代號，而代號和真名的對照表從不離開平台。
 
-> 本版整合了 v1 架構圖（依據「AI-前後台架構 總結」，2026-10-06）與後續討論：出口管控、模型接入方式、對照表範圍、檢查點處理規則、三階段建置順序。
+> 本版整合了 v1 架構圖（依據「AI-前後台架構 總結」，2026-10-06）與後續討論：出口管控、模型接入方式、對照表範圍、檢查點處理規則、三階段建置順序。系統元件以原架構圖為準（含 ElastiCache、pgvector、租戶子網域等）。
 
 ---
 
 ## 1. 全景：系統元件
 
+> 排版較精確的版本見〈Veilway架構圖v2.pdf〉。
+
 ```mermaid
 flowchart LR
-  U[使用者瀏覽器] --> CF[CloudFront + WAF]
-  CF --> S3W[S3 前台靜態檔]
-  CF --> ALB[ALB]
-  ALB --> API[C# 業務 API<br/>ECS Fargate / EC2]
-  API --> COG[Cognito 登入]
-  API --> RDS[(RDS PostgreSQL)]
-  API --> S3F[S3 使用者檔案]
-  API --> SQS[SQS] --> WK[Worker]
-  WK --> S3F
-  API --> GW[隱道閘道]
-  WK --> GW
+  U[iPad／瀏覽器] -- HTTPS --> CF[CloudFront + WAF<br/>單一網域 · 萬用憑證（租戶子網域）]
+  CF -- "/*" --> S3W[S3 前台<br/>SPA 靜態檔]
+  CF -- "/api/*" --> ALB[ALB<br/>只負責分流]
+  subgraph BE[ASP.NET Core 後端 · ECS Fargate（至少 2 個容器）]
+    API[業務 API<br/>C# Controller]
+    TM[租戶管理<br/>方案 · 額度 · 計量]
+    MU[媒體上傳<br/>簽發 S3 直傳網址]
+    GW[隱道閘道<br/>遮蔽 · 檢查 · 還原]
+  end
+  ALB --> API
+  subgraph DATA[資料層 · 讀寫依 TENANT_ID 強制隔離（RLS）]
+    RDS[(RDS PostgreSQL<br/>pgvector · 多可用區)]
+    EC[(ElastiCache<br/>Session · 限流)]
+    S3F[S3 檔案<br/>依租戶分 prefix]
+    SQS[SQS → Worker<br/>長任務 · 影音處理]
+  end
+  API --> RDS
+  API --> EC
+  TM --> RDS
   GW --> RDS
+  MU --> S3F
+  API --> SQS
+  SQS -. Worker 呼叫 AI 也經閘道 .-> GW
   GW -- 唯一對外 AI 路徑<br/>只送代號 --> PL[PrivateLink<br/>VPC endpoint] --> CP[Claude Platform on AWS]
   GW -- 隱道連接器 --> OL[Ollama / vLLM<br/>租戶機房或開發用]
 ```
 
 | 層 | 元件 | 說明 |
 | --- | --- | --- |
-| 邊緣 | CloudFront + WAF | 前台快取、TLS、基本防護 |
-| 前台 | S3 靜態網站 | 只透過 CloudFront 存取（OAC），bucket 不公開 |
-| 分流 | ALB | 把 `/api/*` 轉到後端。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2 |
-| 業務 API | C# controller | 跑在 ECS Fargate 或 EC2 的私有子網 |
-| 身分 | Cognito | 簽發 JWT；token 內帶 `tenant_id`。登入狀態不需要另外存 session |
-| 資料 | RDS PostgreSQL | 租戶、使用者、對話歷史、對照表、稽核紀錄、計量。每張表都帶 `tenant_id`，搭配 Row-Level Security |
-| 檔案 | S3（私有） | 使用者上傳的原始檔，以 SSE-KMS 加密 |
-| 非同步 | SQS + Worker | 文件解析、OCR、大檔遮蔽、批次任務 |
+| 邊緣 | CloudFront + WAF | 單一網域、萬用憑證，每個租戶一個子網域（例如 `acme.example.com`）；前台快取、TLS、基本防護。`/*` 到 S3 前台，`/api/*` 到 ALB |
+| 前台 | S3 靜態網站（SPA） | 只透過 CloudFront 存取（OAC），bucket 不公開 |
+| 分流 | ALB | 只負責分流到後端容器。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2 |
+| 後端 | ASP.NET Core · ECS Fargate | 正式環境**至少 2 個容器**（跨可用區），跑在私有子網。內含四個模組：業務 API（C# Controller）、租戶管理、媒體上傳、隱道閘道 |
+| 租戶管理 | 後端模組 | 租戶的方案、額度、計量；AI token 用量與檔案用量都記在這裡 |
+| 媒體上傳 | 後端模組 | 簽發 S3 直傳網址（presigned URL），檔案不經過後端 |
+| 身分 | Cognito | 簽發 JWT，token 內帶 `tenant_id`。API 要核對子網域對應的租戶和 token 裡的 `tenant_id` 一致 |
+| 資料 | RDS PostgreSQL（多可用區） | 租戶、使用者、對話歷史、對照表、稽核紀錄、計量。每張表都帶 `tenant_id`，搭配 Row-Level Security。啟用 **pgvector** 擴充，給 RAG 存向量 |
+| 快取 | ElastiCache | **Session**（登入狀態、登出後讓 token 失效）與**限流**（每個租戶、每個使用者的請求頻率和 AI 額度）。要開啟傳輸中與靜態加密；**不放對照表或任何真名** |
+| 檔案 | S3（私有） | 使用者上傳的原始檔，**依租戶分 prefix**（`tenants/{tenant_id}/…`），以 SSE-KMS 加密；IAM 與 presigned URL 都限制在該租戶的 prefix |
+| 非同步 | SQS + Worker | 長任務與影音處理：文件解析、OCR、錄音轉文字、大檔遮蔽、批次任務 |
 | AI 出口 | 隱道閘道 | 後端內**唯一**能連到平台外模型的元件 |
 | 橫向服務 | Secrets Manager、KMS、CloudWatch | 金鑰、加密、監控 |
 
@@ -203,7 +219,8 @@ flowchart LR
 - **代號格式**：用 `[PERSON_1]`，在 system prompt 要求模型原樣保留代號。視需要讓代號帶屬性，例如 `[PERSON_1:男:客戶]`，讓模型用對稱謂，但這會多洩漏一點資訊，屬於取捨。
 - **需要計算的資料**：日期用相對位移、年齡用區間，避免遮蔽後模型算不出來。
 - **Tool calling**：模型呼叫工具時，參數先還原成真值才在平台內執行；工具回傳的結果重新遮蔽後才送回模型。
-- **RAG**：文件入庫前先遮蔽，並使用租戶範圍的對照表。
+- **RAG**：向量存在 RDS 的 **pgvector**（不另外架向量資料庫），一樣靠 `tenant_id` 和 Row-Level Security 隔離。文件入庫前先遮蔽，並使用租戶範圍的對照表。
+  - **嵌入（embedding）模型要另外選**：Anthropic 不提供 embedding API。建議用平台內 CPU 可跑的多語嵌入模型，這樣向量化不會多出一條對外路徑；若改用外部嵌入服務，也必須經過隱道閘道，只送遮蔽後的文字。
 - **檔案**：上傳的原檔留在 S3；送給模型的是遮蔽後抽出的文字。影像先 OCR 再走文字流程，錄音先轉成文字再走文字流程。
 
 ---
@@ -236,6 +253,7 @@ flowchart LR
 - [ ] 是否向 Anthropic 申請零資料保留（ZDR）
 - [ ] 預設 `inference_geo` 用 `global` 還是 `us`
 - [ ] 跨境傳輸的揭露文字與合約條款（法務）
+- [ ] RAG 用的嵌入模型（建議平台內 CPU 模型）
 - [ ] 檢查點遇到低信心命中時，各租戶的預設政策
 - [ ] 代號是否帶屬性（性別、角色）
 - [ ] 間接識別資訊的遮蔽規則
