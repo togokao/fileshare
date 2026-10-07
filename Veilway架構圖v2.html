@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>隱道 Veilway</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* 版面：單欄閱讀頁，兩張架構圖各自可橫向捲動；隱道路徑用琥珀色標示，其餘元件為中性色 */
+:root{
+  color-scheme:light;
+  --bg:#EEF2F1; --surface:#FFFFFF; --ink:#16262B; --muted:#596A6F; --line:#C9D4D1; --region:#E2EBE9;
+  --brand:#0E5961; --veil:#B5661A; --veil-soft:#F6E7D3; --stop:#AB3434; --stop-soft:#F6DCDC;
+  --f-display:"Noto Serif TC","PingFang TC","Microsoft JhengHei",serif;
+  --f-body:"Noto Sans TC",system-ui,-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Consolas,"Noto Sans TC",monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0E1618; --surface:#162327; --ink:#E2ECEA; --muted:#93A6AA; --line:#33474C; --region:#13201F;
+  --brand:#5DB2B8; --veil:#E6A257; --veil-soft:#3A2A16; --stop:#E57A7A; --stop-soft:#3D1D1D; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0E1618; --surface:#162327; --ink:#E2ECEA; --muted:#93A6AA; --line:#33474C; --region:#13201F;
+  --brand:#5DB2B8; --veil:#E6A257; --veil-soft:#3A2A16; --stop:#E57A7A; --stop-soft:#3D1D1D; color-scheme:dark}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.7}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:16px;padding-block:40px 64px;display:flex;flex-direction:column;gap:40px}
+header{display:flex;flex-direction:column;gap:8px;max-width:44rem}
+.eyebrow{font-size:13px;letter-spacing:.12em;color:var(--muted);margin:0}
+h1{font-family:var(--f-display);font-size:clamp(32px,6vw,48px);line-height:1.15;margin:0;text-wrap:balance}
+h1 span{font-family:var(--f-body);font-weight:500;font-size:.5em;color:var(--muted);margin-left:.4em;letter-spacing:.04em}
+.lede{font-size:18px;margin:0}
+.ver{font-size:13px;color:var(--brand);margin:0;font-weight:500}
+h2{font-family:var(--f-display);font-size:24px;margin:0;text-wrap:balance}
+h3{font-size:16px;margin:4px 0 0}
+section{display:flex;flex-direction:column;gap:14px;min-width:0}
+section > p{margin:0;max-width:48rem;color:var(--muted)}
+figure{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.scroll{overflow-x:auto}
+svg{display:block;width:100%;min-width:760px;height:auto}
+figcaption{font-size:14px;color:var(--muted);max-width:52rem}
+figcaption b{color:var(--ink);font-weight:500}
+
+/* SVG 元素樣式 */
+.box{fill:var(--surface);stroke:var(--line);stroke-width:1.5}
+.box.veil{fill:var(--veil-soft);stroke:var(--veil);stroke-width:2}
+.box.alt{stroke-dasharray:6 5}
+.box.stop{fill:var(--stop-soft);stroke:var(--stop)}
+.box.group{fill:none;stroke:var(--line)}
+.region{fill:var(--region);stroke:none}
+.t{fill:var(--ink);font-family:var(--f-body);font-size:15px;font-weight:700}
+.s{fill:var(--muted);font-family:var(--f-body);font-size:12.5px}
+.lab{fill:var(--muted);font-family:var(--f-body);font-size:12.5px}
+.lab.v{fill:var(--veil);font-weight:700}
+.lab.x{fill:var(--stop);font-weight:700}
+.mono{fill:var(--ink);font-family:var(--f-mono);font-size:12.5px}
+.mono.v{fill:var(--veil)}
+.rl{fill:var(--brand);font-family:var(--f-body);font-size:13px;font-weight:700;letter-spacing:.06em}
+.ln{fill:none;stroke:var(--muted);stroke-width:1.6}
+.ln.v{stroke:var(--veil);stroke-width:2.2}
+.ln.x{stroke:var(--stop)}
+.ln.d{stroke-dasharray:6 5}
+.edge{stroke:var(--veil);stroke-width:2;stroke-dasharray:7 6}
+.ah{fill:var(--muted)} .ahv{fill:var(--veil)} .ahx{fill:var(--stop)}
+
+/* 表格 */
+.table-wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+table{border-collapse:collapse;width:100%;font-size:15px;min-width:600px}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font-size:12.5px;letter-spacing:.06em;color:var(--muted);font-weight:500}
+table.comp td:nth-child(2){font-weight:700;white-space:nowrap}
+table.comp td:nth-child(3){font-family:var(--f-mono);font-size:13.5px;color:var(--veil);white-space:nowrap}
+table.kv td:first-child{font-weight:700;white-space:nowrap}
+.tag{display:inline-block;font-size:12.5px;font-weight:700;padding:1px 8px;border-radius:999px;white-space:nowrap}
+.tag.ok{background:var(--veil-soft);color:var(--veil)}
+.tag.no{background:var(--stop-soft);color:var(--stop)}
+
+/* 卡片與重點 */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 20px;display:flex;flex-direction:column;gap:8px}
+.card ul,.card ol{margin:0;padding-left:1.4em}
+.card li{margin:2px 0}
+.callout{border-left:4px solid var(--veil);background:var(--veil-soft);border-radius:10px;padding:12px 16px;margin:0}
+.callout b{color:var(--ink)}
+.note{font-size:14px;color:var(--muted);margin:0}
+.foot{font-size:13px;color:var(--muted);margin:0}
+.foot a{color:var(--brand)}
+code{font-family:var(--f-mono);font-size:.9em}
+
+@media print{
+  @page{size:A4;margin:12mm}
+  :root{--bg:#FFFFFF}
+  body{font-size:13.5px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .wrap{padding:0 3px;gap:24px;max-width:none}
+  svg{min-width:0}
+  .scroll{overflow:visible}
+  .table-wrap{overflow:hidden}
+  table{min-width:0;font-size:12.5px}
+  th,td{padding:7px 10px}
+  figure,.card,.callout,tr{break-inside:avoid}
+  h2{break-after:avoid}
+  .lede{font-size:15px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">多租戶 AI 應用平台 · 架構圖 v2</p>
+    <h1>隱道<span>Veilway</span></h1>
+    <p class="lede">所有 AI 請求都走同一條道：送出前在平台內把個資換成代號，回覆回來後再換回真名。外部模型從頭到尾只看得到代號。</p>
+    <p class="ver">v2（2026-10-07）：出口改走 PrivateLink、補上推論位置的查證結果、檢查點處理規則，以及特殊合規租戶的建議。</p>
+  </header>
+
+  <section>
+    <h2>全景：隱道在系統中的位置</h2>
+    <p>前台、業務 API、資料庫都是標準配置。整套架構跟一般 SaaS 不同的地方，在於後端唯一能連到平台外模型的出口，就是隱道閘道。</p>
+    <figure>
+      <div class="scroll">
+        <svg viewBox="0 0 1000 540" role="img" aria-label="系統全景：iPad 經 CloudFront 進入，靜態前台在 S3，API 經 ALB 到 Fargate 上的 ASP.NET Core 後端；後端讀寫 RDS、ElastiCache、S3 與 SQS。只有隱道閘道會跨越平台邊界，經 PrivateLink 連到 Claude Platform on AWS，或經連接器連到租戶地端 LLM，而且只送代號。">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="a1v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahv" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+
+          <line class="edge" x1="750" y1="28" x2="750" y2="530"/>
+          <text class="rl" x="738" y="20" text-anchor="end">平台內 · AWS 台北 ap-east-2</text>
+          <text class="rl" x="762" y="20">平台外</text>
+
+          <rect class="box" x="330" y="34" width="200" height="44" rx="10"/>
+          <text class="t" x="430" y="61" text-anchor="middle">iPad／瀏覽器</text>
+          <line class="ln" x1="430" y1="78" x2="430" y2="104" marker-end="url(#a1)"/>
+          <text class="lab" x="440" y="96">HTTPS</text>
+
+          <rect class="box" x="230" y="108" width="400" height="52" rx="10"/>
+          <text class="t" x="430" y="131" text-anchor="middle">CloudFront</text>
+          <text class="s" x="430" y="150" text-anchor="middle">WAF · 單一網域 · 萬用憑證（租戶子網域）</text>
+
+          <line class="ln" x1="315" y1="160" x2="315" y2="194" marker-end="url(#a1)"/>
+          <text class="lab" x="325" y="182">/*</text>
+          <line class="ln" x1="545" y1="160" x2="545" y2="194" marker-end="url(#a1)"/>
+          <text class="lab" x="555" y="182">/api/*</text>
+
+          <rect class="box" x="230" y="198" width="170" height="48" rx="10"/>
+          <text class="t" x="315" y="219" text-anchor="middle">S3 前台</text>
+          <text class="s" x="315" y="237" text-anchor="middle">SPA 靜態檔</text>
+          <rect class="box" x="460" y="198" width="170" height="48" rx="10"/>
+          <text class="t" x="545" y="219" text-anchor="middle">ALB</text>
+          <text class="s" x="545" y="237" text-anchor="middle">只負責分流</text>
+
+          <line class="ln" x1="545" y1="246" x2="545" y2="280" marker-end="url(#a1)"/>
+
+          <rect class="box group" x="40" y="284" width="685" height="126" rx="12"/>
+          <text class="rl" x="58" y="308">ASP.NET Core 後端 · ECS Fargate（至少 2 個容器）</text>
+          <rect class="box" x="58" y="322" width="150" height="70" rx="9"/>
+          <text class="t" x="133" y="352" text-anchor="middle">業務 API</text>
+          <text class="s" x="133" y="372" text-anchor="middle">C# Controller</text>
+          <rect class="box" x="223" y="322" width="150" height="70" rx="9"/>
+          <text class="t" x="298" y="352" text-anchor="middle">租戶管理</text>
+          <text class="s" x="298" y="372" text-anchor="middle">方案 · 額度 · 計量</text>
+          <rect class="box" x="388" y="322" width="150" height="70" rx="9"/>
+          <text class="t" x="463" y="352" text-anchor="middle">媒體上傳</text>
+          <text class="s" x="463" y="372" text-anchor="middle">簽發 S3 直傳網址</text>
+          <rect class="box veil" x="553" y="322" width="155" height="70" rx="9"/>
+          <text class="t" x="630" y="352" text-anchor="middle">隱道閘道</text>
+          <text class="s" x="630" y="372" text-anchor="middle">遮蔽 · 檢查 · 還原</text>
+
+          <rect class="box" x="780" y="296" width="190" height="72" rx="10"/>
+          <text class="t" x="875" y="320" text-anchor="middle">Claude Platform</text>
+          <text class="s" x="875" y="339" text-anchor="middle">on AWS · Anthropic 營運</text>
+          <text class="s" x="875" y="357" text-anchor="middle">推論：global 或 us</text>
+          <rect class="box alt" x="780" y="392" width="190" height="56" rx="10"/>
+          <text class="t" x="875" y="416" text-anchor="middle">租戶地端 LLM</text>
+          <text class="s" x="875" y="435" text-anchor="middle">Ollama · vLLM</text>
+
+          <path class="ln v" d="M708 350 C740 350 744 332 776 332" marker-end="url(#a1v)"/>
+          <path class="ln v d" d="M708 364 C740 364 744 420 776 420" marker-end="url(#a1v)"/>
+          <text class="lab v" x="782" y="276">只送代號</text>
+          <text class="lab v" x="782" y="290">經 PrivateLink</text>
+          <text class="lab v" x="782" y="466">經隱道連接器</text>
+
+          <line class="ln" x1="380" y1="410" x2="380" y2="444"/>
+          <line class="ln" x1="130" y1="444" x2="645" y2="444"/>
+          <text class="lab" x="390" y="436">讀寫 · 依 TENANT_ID 強制隔離（RLS）</text>
+          <line class="ln" x1="130" y1="444" x2="130" y2="462" marker-end="url(#a1)"/>
+          <line class="ln" x1="315" y1="444" x2="315" y2="462" marker-end="url(#a1)"/>
+          <line class="ln" x1="480" y1="444" x2="480" y2="462" marker-end="url(#a1)"/>
+          <line class="ln" x1="645" y1="444" x2="645" y2="462" marker-end="url(#a1)"/>
+
+          <rect class="box" x="40" y="466" width="180" height="56" rx="10"/>
+          <text class="t" x="130" y="490" text-anchor="middle">RDS PostgreSQL</text>
+          <text class="s" x="130" y="509" text-anchor="middle">pgvector · 多可用區</text>
+          <rect class="box" x="240" y="466" width="150" height="56" rx="10"/>
+          <text class="t" x="315" y="490" text-anchor="middle">ElastiCache</text>
+          <text class="s" x="315" y="509" text-anchor="middle">Session · 限流</text>
+          <rect class="box" x="410" y="466" width="140" height="56" rx="10"/>
+          <text class="t" x="480" y="490" text-anchor="middle">S3 檔案</text>
+          <text class="s" x="480" y="509" text-anchor="middle">依租戶分 prefix</text>
+          <rect class="box" x="570" y="466" width="150" height="56" rx="10"/>
+          <text class="t" x="645" y="490" text-anchor="middle">SQS → Worker</text>
+          <text class="s" x="645" y="509" text-anchor="middle">長任務 · 影音處理</text>
+        </svg>
+      </div>
+      <figcaption><b>琥珀色是唯一跨出平台的路徑。</b>平台元件都在台北區域內；登入（Cognito）、金鑰（Secrets Manager／KMS）、監控（CloudWatch）屬於橫向服務，圖中省略。MVP 階段可以先拿掉 ALB，後端改跑單台 EC2。線上模型由原文件的 Amazon Bedrock 改為 Claude Platform on AWS：同樣走 AWS IAM 與帳單，但功能與 Anthropic 自家 API 同步。閘道經 <b>PrivateLink</b> 連線，不經過公網。注意：<b>模型推論在 Anthropic 的資料中心進行（global 或 us），不在台北</b>；跨出平台的只有代號化後的內容（見「出口與推論位置」）。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>一次請求怎麼走過隱道</h2>
+    <p>以文件中的例子示範：使用者輸入含有人名和地點的句子，Claude 收到的只有代號，回覆也是代號，最後由平台換回真名。</p>
+    <figure>
+      <div class="scroll">
+        <svg viewBox="0 0 1000 440" role="img" aria-label="請求流程：使用者輸入經遮蔽器換成代號並寫入對照表，檢查點確認沒有殘留個資後才跨越平台邊界送給 Claude Platform on AWS 或租戶地端 LLM；若仍有個資則先自動補遮，補遮後仍命中就攔下。回覆仍是代號，回到平台後由還原器讀取對照表換回真名，再顯示給使用者。">
+          <defs>
+            <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="b1v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahv" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="b1x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahx" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+
+          <rect class="region" x="16" y="40" width="712" height="384" rx="14"/>
+          <text class="rl" x="36" y="66">隱道閘道 · 平台內（對照表只存在這裡）</text>
+          <line class="edge" x1="744" y1="34" x2="744" y2="432"/>
+          <text class="lab v" x="744" y="24" text-anchor="middle">只有代號跨越這條線</text>
+          <text class="rl" x="866" y="66" text-anchor="middle">平台外</text>
+
+          <text class="mono" x="106" y="98" text-anchor="middle">王小明與陳經理討論…</text>
+          <rect class="box" x="36" y="110" width="140" height="64" rx="10"/>
+          <text class="t" x="106" y="138" text-anchor="middle">使用者輸入</text>
+          <text class="s" x="106" y="160" text-anchor="middle">含真實個資</text>
+          <line class="ln" x1="176" y1="142" x2="222" y2="142" marker-end="url(#b1)"/>
+
+          <text class="mono v" x="301" y="98" text-anchor="middle">[人名1]與[人名2]討論…</text>
+          <rect class="box veil" x="226" y="110" width="150" height="64" rx="10"/>
+          <text class="t" x="301" y="138" text-anchor="middle">遮蔽器</text>
+          <text class="s" x="301" y="160" text-anchor="middle">正規＋字典＋NER</text>
+          <line class="ln v" x1="376" y1="142" x2="422" y2="142" marker-end="url(#b1v)"/>
+
+          <rect class="box veil" x="426" y="110" width="150" height="64" rx="10"/>
+          <text class="t" x="501" y="138" text-anchor="middle">檢查點</text>
+          <text class="s" x="501" y="160" text-anchor="middle">送出前最後一關</text>
+          <line class="ln v" x1="576" y1="142" x2="772" y2="142" marker-end="url(#b1v)"/>
+          <text class="lab v" x="640" y="132" text-anchor="middle">通過才送出</text>
+
+          <text class="mono v" x="876" y="98" text-anchor="middle">建議[人名1]先與[人名2]…</text>
+          <rect class="box" x="776" y="110" width="200" height="64" rx="10"/>
+          <text class="t" x="876" y="138" text-anchor="middle">Claude Platform</text>
+          <text class="s" x="876" y="160" text-anchor="middle">on AWS · 只看得到代號</text>
+
+          <path class="ln v d" d="M690 142 L690 254 L772 254" marker-end="url(#b1v)"/>
+          <text class="lab v" x="700" y="206">或</text>
+          <rect class="box alt" x="776" y="226" width="150" height="56" rx="10"/>
+          <text class="t" x="851" y="250" text-anchor="middle">租戶地端 LLM</text>
+          <text class="s" x="851" y="270" text-anchor="middle">經隱道連接器</text>
+
+          <line class="ln x" x1="501" y1="174" x2="501" y2="210" marker-end="url(#b1x)"/>
+          <text class="lab x" x="510" y="196">仍有個資</text>
+          <rect class="box stop" x="421" y="214" width="160" height="48" rx="9"/>
+          <text class="t" x="501" y="235" text-anchor="middle">自動補遮後重檢</text>
+          <text class="lab x" x="501" y="253" text-anchor="middle">仍命中就攔下</text>
+
+          <line class="ln" x1="301" y1="174" x2="301" y2="262" marker-end="url(#b1)"/>
+          <text class="lab" x="309" y="222">寫入</text>
+          <rect class="box" x="226" y="266" width="150" height="56" rx="10"/>
+          <text class="t" x="301" y="290" text-anchor="middle">對照表</text>
+          <text class="mono" x="301" y="310" text-anchor="middle">王小明 ↔ [人名1]</text>
+          <path class="ln" d="M376 294 L430 294 L430 342" marker-end="url(#b1)"/>
+          <text class="lab" x="438" y="322">讀取</text>
+
+          <path class="ln v" d="M956 174 L956 378 L580 378" marker-end="url(#b1v)"/>
+          <text class="lab v" x="662" y="368" text-anchor="middle">回覆（仍是代號）</text>
+          <rect class="box veil" x="400" y="346" width="176" height="64" rx="10"/>
+          <text class="t" x="488" y="374" text-anchor="middle">還原器</text>
+          <text class="s" x="488" y="396" text-anchor="middle">代號換回真名 · 串流緩衝</text>
+          <line class="ln" x1="400" y1="378" x2="180" y2="378" marker-end="url(#b1)"/>
+          <text class="mono" x="290" y="400" text-anchor="middle">建議王小明先與陳經理確認…</text>
+          <rect class="box" x="36" y="346" width="140" height="64" rx="10"/>
+          <text class="t" x="106" y="374" text-anchor="middle">使用者看到</text>
+          <text class="s" x="106" y="396" text-anchor="middle">真名已換回</text>
+        </svg>
+      </div>
+      <figcaption><b>對照表從不離開平台</b>，所以外部模型就算保留了請求內容，也無法把代號對回真人。每次實際送出的遮蔽後內容，以及實際推論位置（<code>usage.inference_geo</code>），會寫進 AI_REQUEST_LOG 作為稽核紀錄。影像、錄音和間接識別資訊的遮蔽方式還待設計。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>隱道的元件</h2>
+    <div class="table-wrap">
+      <table class="comp">
+        <thead><tr><th>位置</th><th>中文名</th><th>英文名</th><th>做法</th></tr></thead>
+        <tbody>
+          <tr><td>後端內的 AI Gateway</td><td>隱道閘道</td><td>Veilway Gateway</td><td>統一介面（IChatClient），遮蔽、檢查、還原、計量各為一層 DelegatingChatClient；唯一能連到平台外模型的出口</td></tr>
+          <tr><td>去程第一步</td><td>遮蔽器</td><td>Veil Masker</td><td>三層：① 正規表示式（身分證、電話、Email、卡號、統編）② 租戶字典（客戶名單、員工名冊）③ CPU 可跑的繁中 NER（人名、地址、公司名）；另做別名展開：王小明 → 小明、王先生</td></tr>
+          <tr><td>平台資料庫</td><td>對照表</td><td>Veil Map</td><td>真名與代號的對應，只存在平台內（RDS，以租戶的 KMS key 加密）。預設每個對話一張並設 TTL；RAG 才用租戶範圍；絕不跨租戶</td></tr>
+          <tr><td>跨越邊界前</td><td>檢查點</td><td>Veil Check</td><td>送出前比對對照表原值、重跑正規表示式、比對租戶字典；處理規則見下一節</td></tr>
+          <tr><td>回程</td><td>還原器</td><td>Unveiler</td><td>讀取對照表，把回覆中的代號換回真名；容許模型改寫代號格式，串流時用緩衝區處理被切開的代號</td></tr>
+          <tr><td>通往租戶機房</td><td>隱道連接器</td><td>Veilway Connector</td><td>接 Ollama／vLLM 等 OpenAI 相容端點，切換只需改 endpoint；有特殊合規要求的租戶走這條</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>檢查點：攔下之後怎麼辦</h2>
+    <p>檢查點掃描「準備送出的最終文字」，檢查三件事：對照表裡已登記的原值又出現了、格式固定的個資漏網、租戶字典裡的名字出現了。</p>
+    <div class="table-wrap">
+      <table class="kv">
+        <thead><tr><th>情況</th><th>處理</th></tr></thead>
+        <tbody>
+          <tr><td>對照表裡的原值沒換掉</td><td>自動補遮後重送，使用者不會感覺到</td></tr>
+          <tr><td>高信心命中（身分證、卡號）</td><td>自動補遮；補遮後仍命中就 <span class="tag no">fail-closed</span>，拒絕送出</td></tr>
+          <tr><td>低信心命中（如「林立」）</td><td>依租戶政策：嚴格的租戶直接拒絕；一般租戶讓使用者勾選「這不是個資」後送出，並記下這次放行</td></tr>
+          <tr><td>檢查點故障或逾時</td><td>一律 <span class="tag no">fail-closed</span>，不能因為檢查服務壞了就放行</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note"><b>限制：</b>NER 第一次沒認出來的名字，檢查點多半也認不出來。檢查點防的是程式出錯，不是第二層 NER。每次攔截都寫入稽核紀錄（類型與處理方式），但<b>不記錄命中的原文</b>。</p>
+  </section>
+
+  <section>
+    <h2>出口與推論位置</h2>
+    <p>以下依 Anthropic 官方文件查證（2026-10）。</p>
+    <div class="table-wrap">
+      <table class="kv">
+        <thead><tr><th>項目</th><th>結果</th></tr></thead>
+        <tbody>
+          <tr><td>VPC endpoint</td><td><span class="tag ok">支援</span> AWS PrivateLink。閘道經 VPC endpoint 連線，endpoint 的 security group 與 policy 只允許閘道，呼叫權限只授權給閘道的 IAM role</td></tr>
+          <tr><td>區域</td><td>所有 AWS 商用區域皆可用；workspace 建在台北區域，只能從台北端點存取</td></tr>
+          <tr><td>推論位置</td><td><code>inference_geo</code> 只有 <code>global</code>（預設，全球任一 Anthropic 資料中心）與 <code>us</code>（只在美國，價格 1.1 倍）；<span class="tag no">沒有台灣或亞太選項</span></td></tr>
+          <tr><td>AWS 區域的作用</td><td>只決定端點與 IAM、CloudTrail、帳單的範圍，<b>不決定推論在哪裡</b></td></tr>
+          <tr><td>資料保存位置</td><td>不可設定，目前為 <code>us</code></td></tr>
+          <tr><td>資料處理者</td><td>Anthropic；保留政策同第一方 API，零資料保留（ZDR）需另外申請</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="callout"><b>結論：端點在台北，推論與保存在境外。</b>這正是隱道要解決的問題：出境的只有代號，對照表留在台北。對外說法統一為「平台在台灣，只有代號化後的內容出境」，不說「資料都在台灣」。代號化屬於假名化，仍算個人資料，服務條款與租戶合約需揭露推論位置與資料處理者。</p>
+  </section>
+
+  <section>
+    <h2>有特殊合規要求的租戶：建議自建地端 AI</h2>
+    <p>租戶若要求資料（即使已代號化）不得出境、推論必須在特定地點或處理者的設施內進行，或受主管機關對委外與跨境傳輸的限制（例如金融、醫療、公部門），平台不提供境外模型，而是建議租戶在自己的機房架設地端 AI，平台經隱道連接器接過去。</p>
+    <div class="card">
+      <h3>為什麼這樣建議</h3>
+      <ol>
+        <li><b>只有地端能完全做到資料不出境。</b>推論位置只有 global 與 us，沒有台灣選項；對最嚴格的租戶，代號出境本身就可能不被接受。</li>
+        <li><b>不涉及第三方資料處理者。</b>地端由租戶自己營運，不需另簽資料處理協議或評估跨境傳輸。</li>
+        <li><b>不必另外維護第二條雲端路徑。</b>改走 Bedrock 也是選項，但要多維護一套模型 ID 與功能差異，而且仍在租戶的控制之外。</li>
+        <li><b>架構已經預留。</b>隱道連接器只需改 endpoint，依路由政策導向地端，業務程式碼不必修改。</li>
+        <li><b>回答品質可以更好。</b>模型在租戶機房時，可依租戶政策不做遮蔽，模型看得到完整上下文。</li>
+      </ol>
+      <p class="note"><b>取捨（要先講清楚）：</b>地端模型能力通常不如 Claude；GPU、維運與更新由租戶負責；平台只保證連接器與路由的正確性。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>建置三階段</h2>
+    <div class="table-wrap">
+      <table class="kv">
+        <thead><tr><th>階段</th><th>內容</th><th>完成時能做到</th></tr></thead>
+        <tbody>
+          <tr><td>1 · 骨架</td><td>VPC、IaC、CI/CD、CloudFront＋WAF、S3 前台、ALB、C# API、Cognito、RDS 基本資料表（含 RLS）</td><td>能登入，前台呼叫 API，依租戶讀寫資料</td></tr>
+          <tr><td>2 · 隱道</td><td>隱道閘道、Claude Platform on AWS（PrivateLink）、對照表／對話／稽核／計量存 RDS、Ollama 開發用</td><td>能多輪對話，外部只看得到代號</td></tr>
+          <tr><td>3 · 檔案與非同步</td><td>S3 上傳、SQS＋Worker、文件解析與遮蔽、影音處理；可選：RAG、Batch、租戶地端連接器</td><td>上傳文件請 AI 分析，耗時工作不卡住 API</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="foot">依據「AI-前後台架構 總結」（2026-10-06）繪製；線上模型已改為 Claude Platform on AWS，並依 Anthropic 官方文件查證出口與推論位置（2026-10-07）。參考：<a href="https://platform.claude.com/docs/en/build-with-claude/claude-platform-on-aws">Claude Platform on AWS</a>、<a href="https://platform.claude.com/docs/en/manage-claude/data-residency">Data residency</a>。</p>
+</div>
+</body>
+</html>
