@@ -81,7 +81,7 @@
 1. **保護 root 帳號**
    - 以 root 登入 → 右上角帳號名稱 → **Security credentials** → 為 root 設定 **MFA**。
    - 刪除 root 的存取金鑰（如果有）。之後**不再用 root 做日常操作**。
-2. **建立組織與環境帳號**
+2. **建立組織與環境帳號**（詳細步驟見下方「1.2 建立組織與環境帳號」）
    - **AWS Organizations** → **Create an organization** → 新增帳號：`veilway-sandbox`、`veilway-dev`、`veilway-staging`、`veilway-prod`。
 3. **人員登入改用 IAM Identity Center**
    - **IAM Identity Center** → **Enable** → 建立使用者與群組 → 指派權限集（例如開發者在 sandbox、dev 有 `PowerUserAccess`，在 prod 只有唯讀）。
@@ -95,9 +95,80 @@
 6. **稽核紀錄**
    - **CloudTrail** → **Create trail** → 套用到組織的所有帳號、所有區域，紀錄存進專用的 S3 bucket（開啟加密，並禁止刪除）。
 
+### 1.2 建立組織與環境帳號
+
+#### 組織與帳號的關係
+
+組織只有**一個**，底下有多個 AWS 帳號：
+
+```
+組織（Organization）
+├── 管理帳號（建立組織的那個帳號）：只管組織和帳單，不放任何系統資源
+├── veilway-sandbox
+├── veilway-dev
+├── veilway-staging
+└── veilway-prod
+```
+
+#### 四個環境帳號的目的
+
+| 帳號 | 用途 | 誰在用 | 資料 | 可以隨意修改嗎 |
+| --- | --- | --- | --- | --- |
+| **sandbox** | 照本手冊用主控台**手動練習**，弄懂每個設定在做什麼 | 開發人員 | 沒有 | 可以，練完整個清掉 |
+| **dev** | 開發中的程式部署到這裡，每天測試新功能 | 開發人員 | 假資料 | 可以，壞了就用 IaC 重建 |
+| **staging** | 上線前的**彩排**：規格和設定跟 prod 一樣（多 AZ、至少 2 個容器），跑第 15 步的驗收 | 開發、測試人員 | 假資料，量接近正式 | 不行，只能透過 CI/CD 部署 |
+| **prod** | 正式環境，租戶真正在用 | 租戶 | **真實客戶資料** | 絕對不行，部署要人工核准 |
+
+**為什麼要分成不同帳號**，而不是在同一個帳號裡用名稱區分環境：
+
+1. **出錯不會波及正式環境**：在 dev 誤刪資源、改錯網路設定，prod 完全不受影響。帳號之間預設完全隔離。
+2. **權限可以分開給**：開發人員在 dev 有完整權限，在 prod 只能唯讀，設定起來很單純。
+3. **帳單一目了然**：每個帳號的花費分開列出，看得出是 dev 太貴還是 prod 用量增加。
+4. **稽核範圍明確**：存放真實個資的只有 prod。對 Veilway 這種處理個資的平台特別重要。
+5. **刪了能重建**：sandbox、dev 可以整個清掉重來，不怕留下沒人記得的資源。
+
+**實際的使用順序**：sandbox 手動練習 → dev 用 CDK 建立、每天開發 → staging 用同一份 CDK、改成正式規格、跑驗收 → prod 同一份 CDK、驗收通過且人工核准後才部署。
+
+> 只有一個人、想先省事時，可以**先只建 sandbox 和 dev**，staging、prod 等快上線再用 IaC 建立。帳號本身不收費，只有在裡面建立資源才會計費。
+
+#### A. 建立組織
+
+1. 主控台上方搜尋列輸入 **Organizations**，進入 **AWS Organizations**。
+2. 按 **建立組織**（Create an organization）。
+3. AWS 會寄驗證信到 root 的 email，點信裡的連結完成驗證。不驗證的話，後面無法建立或邀請帳號。
+
+> ⚠️ 建立組織的帳號會成為**管理帳號**（management account）。它只用來管組織和帳單，**不要在裡面建立任何系統資源**，VPC、RDS 等都放在環境帳號裡。
+
+#### B. 建立四個環境帳號
+
+在 Organizations 頁面按 **新增 AWS 帳戶** → **建立 AWS 帳戶**，每個帳號做一次：
+
+| 帳戶名稱 | 電子郵件（範例） |
+| --- | --- |
+| `veilway-sandbox` | `<信箱帳號>+veilway-sandbox@gmail.com` |
+| `veilway-dev` | `<信箱帳號>+veilway-dev@gmail.com` |
+| `veilway-staging` | `<信箱帳號>+veilway-staging@gmail.com` |
+| `veilway-prod` | `<信箱帳號>+veilway-prod@gmail.com` |
+
+- **IAM 角色名稱**：保留預設的 `OrganizationAccountAccessRole`，管理帳號可以透過這個角色切換進各環境帳號。
+- 每個帳號的 email **必須不同**，也不能被其他 AWS 帳號用過。Gmail 在帳號後面加 `+` 的寫法，信都會寄到同一個信箱。公司使用時，建議用群組信箱（例如 `aws-dev@公司網域`），不要綁在某位員工的個人信箱。
+- 建立需要幾分鐘，等狀態變成**作用中**（Active）再繼續。
+- 之後要改成員帳號的 email：**Organizations** → **AWS 帳戶** → 點該帳號 → **主要電子郵件** → **更新**，驗證碼會寄到新的 email。
+
+#### C. 收掉成員帳號的 root（建議）
+
+新建立的帳號各自也有 root。雖然沒有設定密碼，但仍可以用「忘記密碼」把它啟用。建議統一收掉：
+
+1. 在管理帳號：**IAM** → 左側 **Root access management**（根存取管理）→ **啟用**。
+2. 兩個選項都勾選：**Root credentials management** 和 **Privileged root actions**。
+
+這樣成員帳號的 root 就無法登入。真的需要 root 操作時，再從管理帳號臨時取得權限。
+
 ### 驗證
 
 - [ ] root 已設定 MFA，且沒有存取金鑰
+- [ ] Organizations 的帳戶清單裡有管理帳號和 4 個環境帳號，狀態都是「作用中」
+- [ ] 成員帳號已啟用 Root access management
 - [ ] 可以用 Identity Center 帳號登入各環境
 - [ ] 區域選單看得到「亞太地區（台北）」，並能切換過去
 - [ ] 收到 Budgets 的測試通知
