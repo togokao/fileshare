@@ -725,53 +725,199 @@ CloudFront 和 Cognito 只能用 us-east-1 的憑證，ALB 只能用同區域（
 
 **目的**：建立私有網路。這一步決定了日後「唯一出口」能不能做到。
 
-### 規劃
+以下以 **sandbox** 為例，在 **`veilway-sandbox` 帳號、亞太地區（台北）** 操作。dev、staging、prod 之後用 IaC 建立，設定相同，只有 AZ 數量、NAT 數量不同（見 3.2 的表格）。
 
-| 子網類型 | 放什麼 | 能不能直接連外 |
+### 3.1 規劃
+
+| 子網類型 | 放什麼 | 能不能連外 | AZ a | AZ b |
+| --- | --- | --- | --- | --- |
+| 公有 | ALB、NAT Gateway | 可以 | public-a | public-b |
+| 私有應用 | Fargate 容器（第一階段：API；第二階段加上閘道） | 經 NAT 或 VPC endpoint | app-a | app-b |
+| 私有資料 | RDS、ElastiCache | **完全不能** | data-a | data-b |
+
+每種子網在每個 AZ 各一個。sandbox、dev 用 2 個 AZ；prod 建議 3 個 AZ（台北有 3 個 AZ）。
+
+### 3.2 用精靈建立 VPC
+
+**VPC** → **建立 VPC** → 選 **VPC 及其他**：
+
+| 欄位 | 設定 | 說明 |
 | --- | --- | --- |
-| 公有子網 | ALB、NAT Gateway | 可以 |
-| 私有應用子網 | Fargate 容器（第一階段：API；第二階段加上閘道） | 經 NAT 或 VPC endpoint 連出去 |
-| 私有資料子網 | RDS、ElastiCache | **完全不能連外** |
+| 名稱標籤自動產生 | 勾選，輸入 `veilway-sandbox`（各環境用 `veilway-<環境>`） | 子網、路由表會自動加上這個前綴 |
+| IPv4 CIDR | `10.0.0.0/16` | ⚠️ 之後很難改。未來要和公司內網或租戶機房 VPN 互連（第三階段的隱道連接器）時不能重疊 |
+| IPv6 CIDR | 無 | |
+| 租用 | 預設 | |
+| 可用區域數量 | **2**（prod：3） | |
+| 公有子網路數量 | **2**（prod：3） | |
+| 私有子網路數量 | **4**（prod：6） | 每個 AZ 一個應用子網、一個資料子網 |
+| NAT 閘道 | 見下表 | |
+| VPC 端點 | **S3 閘道** | 免費 |
+| DNS 主機名稱、DNS 解析 | **兩個都勾選** | VPC interface endpoint 的私有 DNS 需要 |
 
-每種子網在每個 AZ 各一個。dev 可以用 2 個 AZ，prod 建議 3 個 AZ（台北有 3 個 AZ）。
+**NAT 閘道**有三個選項：
 
-### 操作
+| 選項 | 說明 |
+| --- | --- |
+| 無 | 不建 NAT，私有子網完全不能連外。之後的 Fargate、Cognito 驗證等需要連外 |
+| 區域性 – 全新 | 新推出的方式：一個 NAT 涵蓋整個區域，依各 AZ 的工作負載自動擴展 |
+| Zonal | 傳統方式：放在指定的 AZ，再選「在 1 個 AZ 中」或「每個 AZ 各一個」 |
 
-1. **VPC** → **Create VPC** → 選 **VPC and more**：
-   - 名稱：`veilway-dev`；IPv4 CIDR：`10.0.0.0/16`
-   - Number of AZs：2（prod：3）
-   - Public subnets：2；Private subnets：4（每個 AZ 一個應用子網、一個資料子網）
-   - NAT gateways：dev 選 **In 1 AZ**；prod 選 **1 per AZ**
-   - VPC endpoints：勾選 **S3 Gateway**
-2. **調整資料子網的路由**：精靈建立的私有路由表都會指向 NAT。請為資料子網另外建一張路由表，**不要**有 `0.0.0.0/0` 這條路由，確保 RDS、ElastiCache 完全連不出去。
-3. **建立 VPC interface endpoint**（減少走 NAT 的流量，也比較安全）
-   - **VPC** → **Endpoints** → **Create endpoint**，依序建立：`ecr.api`、`ecr.dkr`、`logs`、`secretsmanager`、`sts`、`kms`。dev 若要用 ECS Exec，再加 `ssmmessages`。
-   - 子網選私有應用子網，開啟 **Private DNS**，SG 用 `sg-endpoints`。
-4. **建立 Security Group**（先建空的，後面的步驟再引用）
+| 環境 | NAT 設定 |
+| --- | --- |
+| sandbox、dev | **Zonal → 在 1 個 AZ 中**：費用最低。該 AZ 故障時私有子網暫時無法連外，可接受 |
+| prod | 手冊原設計是 **Zonal → 每個 AZ 各一個**（高可用，費用是 AZ 數倍）。「區域性」可能更簡單，建 prod 前確認台北支援情況與計費後再定案 |
 
-| SG 名稱 | 允許連入 | 來源 | 階段 |
+右側預覽圖確認子網數量正確 → **建立 VPC**，約 1～3 分鐘。
+
+### 3.3 子網與路由表改名
+
+精靈產生的私有子網名稱類似 `veilway-sandbox-subnet-private1-ap-east-2a`，看不出用途。**VPC** → **子網路** → 逐一點選 → **標籤** → **管理標籤** → 修改 `Name`：
+
+| 精靈產生的名稱 | 改成 |
+| --- | --- |
+| `…-public1-…a` | `veilway-sandbox-public-a` |
+| `…-public2-…b` | `veilway-sandbox-public-b` |
+| `…-private1-…a` | `veilway-sandbox-app-a` |
+| `…-private2-…b` | `veilway-sandbox-app-b` |
+| `…-private3-…a` | `veilway-sandbox-data-a` |
+| `…-private4-…b` | `veilway-sandbox-data-b` |
+
+AZ 字尾依實際顯示（可能是 `a`、`b`，也可能是 `a`、`c`）。路由表也照同樣規則改名，例如 `…-rtb-private3-…` 改成 `veilway-sandbox-rtb-data-a`。
+
+### 3.4 讓資料子網完全不能連外 ⚠️
+
+精靈會讓所有私有子網都經 NAT 連外，資料子網要拿掉這條路：
+
+1. **VPC** → **路由表** → 選資料子網的路由表（`…-rtb-private3-…`、`…-rtb-private4-…`）。
+2. **路由** → **編輯路由** → 移除目的地 `0.0.0.0/0`、目標 `nat-…` 的那一列 → **儲存變更**。
+3. 保留 `10.0.0.0/16 → local` 和 S3 的 `pl-…` 路由。
+
+### 3.5 刪除台北的預設 VPC（建議）
+
+進入 **VPC** 會看到兩個 VPC、兩個 `default` 安全群組：
+
+| | CIDR | 怎麼來的 |
+| --- | --- | --- |
+| 預設 VPC | `172.31.0.0/16` | AWS 在每個區域自動建立 |
+| `veilway-sandbox` | `10.0.0.0/16` | 剛才建立的 |
+
+每個 VPC 建立時都會附帶一個 `default` 安全群組，無法刪除，也**不要使用**。
+
+預設 VPC 的子網全是公有、會自動配發公有 IP，資源誤建在裡面就會直接暴露在網路上。Veilway 用不到它：
+
+1. **VPC** → **你的 VPC** → 找到 CIDR `172.31.0.0/16`、「預設 VPC」欄位為「是」的那一個。
+2. ⚠️ 確認**不是** `veilway-<環境>` → **動作** → **刪除 VPC** → 輸入確認文字 → **刪除**。它的子網、網際網路閘道、`default` 安全群組會一起刪除。
+
+需要時可以用 **動作** → **建立預設 VPC** 重建，沒有風險。每個環境帳號的台北區域都建議刪除。
+
+### 3.6 VPC interface endpoint
+
+讓私有子網不經過 NAT 直接連到 AWS 服務：`ecr.api`、`ecr.dkr`、`logs`、`secretsmanager`、`sts`、`kms`；要用 ECS Exec 再加 `ssmmessages`。
+
+每個 endpoint 每個 AZ 都按小時計費，6 個 × 2 AZ **每月約 90 美元**：
+
+| 環境 | 做法 |
+| --- | --- |
+| sandbox | 已經有 NAT，功能上不需要。想練習就只建一個（例如 `secretsmanager`），練完就刪 |
+| dev、staging、prod | 用 IaC 建立 |
+
+建立方式：**VPC** → **端點** → **建立端點** → 服務搜尋名稱（例如 `secretsmanager`）→ VPC 選 `veilway-<環境>` → 子網勾 **app-a、app-b** → 安全群組選 `veilway-endpoints-sg`（3.7 建立）→ 勾選 **啟用私有 DNS 名稱** → **建立端點**。
+
+### 3.7 建立 Security Group
+
+⚠️ **名稱不能以 `sg-` 開頭**（AWS 保留給安全群組 ID，例如 `sg-0fb38ed6…`），一律用 `veilway-<用途>-sg`。名稱建立後不能修改。名稱裡不用加環境，因為各環境在不同帳號。
+
+**先全部建立空的，再回頭設定規則**，因為規則會互相引用。
+
+**VPC** → **安全群組** → **建立安全群組**，⚠️ **VPC 一定要選 `veilway-<環境>`**，不要選到預設 VPC。輸入規則先不加：
+
+| 名稱 | 描述（只能英文） | 階段 |
+| --- | --- | --- |
+| `veilway-alb-sg` | `ALB from CloudFront` | 1 |
+| `veilway-api-sg` | `API containers` | 1 |
+| `veilway-rds-sg` | `RDS PostgreSQL` | 1 |
+| `veilway-cache-sg` | `ElastiCache` | 1 |
+| `veilway-endpoints-sg` | `VPC interface endpoints` | 1 |
+| `veilway-ops-sg` | `One-off tasks` | 1（migration、開通工具等單次 task 使用） |
+| `veilway-gateway-sg` | `Veilway gateway` | **2**（第一階段不用建，IaC 預留） |
+
+建好後逐一點選 → **傳入規則** → **編輯傳入規則** → **新增規則**：
+
+| 安全群組 | 類型 | 連接埠 | 來源 |
 | --- | --- | --- | --- |
-| `sg-alb` | 443 | CloudFront 的 managed prefix list `com.amazonaws.global.cloudfront.origin-facing` | 1 |
-| `sg-api` | 8080（容器的服務埠） | `sg-alb` | 1 |
-| `sg-rds` | 5432 | `sg-api`、`sg-ops` | 1 |
-| `sg-cache` | 6379 | `sg-api` | 1 |
-| `sg-endpoints` | 443 | `sg-api`、`sg-ops` | 1 |
-| `sg-ops` | 不允許連入 | — | 1（migration、開通工具等單次 task 使用） |
-| `sg-gateway` | 8080 | `sg-api` | **2**（第一階段不用建，IaC 預留） |
+| `veilway-alb-sg` | HTTPS | 443 | **字首清單** `com.amazonaws.global.cloudfront.origin-facing` |
+| `veilway-api-sg` | 自訂 TCP | 8080（容器的服務埠） | `veilway-alb-sg` |
+| `veilway-rds-sg` | PostgreSQL | 5432 | `veilway-api-sg` |
+| `veilway-rds-sg` | PostgreSQL | 5432 | `veilway-ops-sg` |
+| `veilway-cache-sg` | 自訂 TCP | 6379 | `veilway-api-sg` |
+| `veilway-endpoints-sg` | HTTPS | 443 | `veilway-api-sg` |
+| `veilway-endpoints-sg` | HTTPS | 443 | `veilway-ops-sg` |
+| `veilway-ops-sg` | 不加任何傳入規則 | | |
+| `veilway-gateway-sg`（第二階段） | 自訂 TCP | 8080 | `veilway-api-sg` |
+
+- 來源欄位輸入 `veilway-` 就會列出可選的安全群組。
+- **傳出規則**保持預設（允許全部）。
+
+### 3.8 暫時不用時：刪除 NAT（保留 VPC）
+
+sandbox 帳號本身一直存在、免費，要刪的是帳號裡**會持續計費的資源**：
+
+| 資源 | 費用 | 處理 |
+| --- | --- | --- |
+| VPC、子網、路由表、安全群組 | 免費 | 可以保留 |
+| **NAT 閘道** | 按小時計費，**沒在用也收費**（每月約 35～45 美元） | 暫時不用時刪除 |
+| NAT 用的**彈性 IP** | 公有 IPv4 按小時計費 | 刪 NAT 後一併釋放 |
+| VPC interface endpoint | 按小時計費 | 練完就刪 |
+
+各步驟是否需要 NAT：
+
+| 步驟 | 需要 NAT 嗎 |
+| --- | --- |
+| 第 4 步 KMS、Secrets Manager | 不需要 |
+| 第 5.1 步 建立 RDS | 不需要 |
+| 第 5.2 步 連進資料庫建帳號 | **需要**（啟動暫時的容器或跳板機） |
+| 第 6 步 ElastiCache、第 7 步 Cognito | 不需要 |
+| 第 9 步 ECS Fargate | **需要**（從 ECR 下載映像檔，或改建 VPC endpoint） |
+
+**刪除 NAT**：
+
+1. **VPC** → **NAT 閘道** → 選 `veilway-sandbox-nat-…` → **動作** → **刪除 NAT 閘道** → 輸入 `delete`。
+2. 等狀態變成「已刪除」（約 1 分鐘）。
+3. **VPC** → **彈性 IP** → 選 NAT 用的那個 → **動作** → **釋放彈性 IP 位址**。要等 NAT 完全刪除後才能釋放。
+
+刪除後，app 子網路由表的 `0.0.0.0/0` 會顯示「**黑洞**」（Blackhole），這是正常的。
+
+**建回 NAT**：
+
+1. **NAT 閘道** → **建立 NAT 閘道**：名稱 `veilway-sandbox-nat`、子網 `veilway-sandbox-public-a`、連線類型 **公有**、按 **配置彈性 IP** → 建立。
+2. `app-a`、`app-b` 的路由表 → **編輯路由** → `0.0.0.0/0` 的目標改成新的 `nat-…` → **儲存**。
+
+### 3.9 整輪練習結束：刪除整個 VPC
+
+在 sandbox 照手冊走完一輪、改用 IaC 建 dev 之後，sandbox 的 VPC 就用不到了。依序：
+
+1. 刪除 VPC 裡的其他資源：ECS service、ALB、RDS、ElastiCache 等（之後步驟建立的）。有資源還在使用子網或安全群組時，VPC 刪不掉。
+2. 刪除 NAT 閘道、VPC interface endpoint（3.8）。
+3. **VPC** → **你的 VPC** → 選 `veilway-sandbox` → **動作** → **刪除 VPC**。子網、路由表、網際網路閘道、安全群組、S3 閘道端點會一起刪除。
+4. 釋放彈性 IP。
+
+之後要再練習，用精靈重建只要幾分鐘。
 
 ### 驗證
 
-- [ ] 資料子網的路由表裡沒有 `0.0.0.0/0`
-- [ ] `sg-rds`、`sg-cache` 只允許上表列出的 SG 連入
+- [ ] VPC `veilway-<環境>`（`10.0.0.0/16`）有正確數量的子網，名稱都已改好
+- [ ] 資料子網的路由表裡**沒有** `0.0.0.0/0`
+- [ ] 應用子網的路由表有 `0.0.0.0/0 → nat-…`（NAT 刪除期間顯示黑洞）
+- [ ] 台北的預設 VPC 已刪除
+- [ ] 6 個安全群組都建立在 `veilway-<環境>` VPC；`veilway-rds-sg`、`veilway-cache-sg` 只允許上表列出的安全群組連入
 
 ### 注意事項
 
-- ⚠️ CIDR 一旦決定很難更改。如果未來可能和公司內網或租戶機房做 VPN 互連（第三階段的隱道連接器），請先確認 `10.0.0.0/16` 不會跟對方的網段重疊。
 - ⚠️ **第一階段的已知限制**：應用子網經 NAT 可以連到任何外部網址。出口管控（egress proxy 或 AWS Network Firewall 加網域 allowlist）排在**第二階段**，和閘道 service 一起上線。在那之前，**任何環境都不放 AI 服務的 API key**。
-- CloudFront 的 prefix list 在 SG 裡會佔用約 50 條規則的額度（每個 SG 預設上限 60 條），`sg-alb` 請不要再加其他規則。
-- NAT Gateway 按小時和流量計費，是 dev 環境裡最容易被忽略的費用。
-- SG 的規則要用「另一個 SG」當來源，不要寫死 IP。
-- 第二階段會在這個 VPC 加上 Claude Platform on AWS 的 PrivateLink endpoint，屆時只允許 `sg-gateway` 連到它。
+- CloudFront 的字首清單在安全群組裡會佔用約 50 條規則的額度（每個安全群組預設上限 60 條），`veilway-alb-sg` 不要再加其他規則。
+- 安全群組的規則要用「另一個安全群組」當來源，不要寫死 IP。
+- NAT Gateway 按小時和流量計費，是 dev、sandbox 環境裡最容易被忽略的費用。
+- 第二階段會在這個 VPC 加上 Claude Platform on AWS 的 PrivateLink endpoint，屆時只允許 `veilway-gateway-sg` 連到它。
 
 ---
 
@@ -821,7 +967,7 @@ CloudFront 和 Cognito 只能用 us-east-1 的憑證，ALB 只能用同區域（
 | 帳密 | **Manage master credentials in AWS Secrets Manager** | 同左 |
 | 執行個體 | Graviton 小型機型（例如 `db.t4g` 系列） | 依負載評估 |
 | 儲存 | gp3，開啟 storage autoscaling | 同左 |
-| 網路 | 第 3 步的 VPC、DB subnet group；**Public access：No**；SG：`sg-rds` | 同左 |
+| 網路 | 第 3 步的 VPC、DB subnet group；**Public access：No**；SG：`veilway-rds-sg` | 同左 |
 | 加密 | 開啟，用 `veilway-data` | 同左 |
 | 備份 | 保留 7 天 | 保留 14～35 天 |
 | 刪除保護 | 可關閉 | **開啟** |
@@ -832,7 +978,7 @@ CloudFront 和 Cognito 只能用 us-east-1 的憑證，ALB 只能用同區域（
 
 ### 5.2 建立帳號、資料庫與擴充
 
-資料庫在私有子網，從外面連不進去。用 ECS Exec 進到一個暫時的容器（SG 用 `sg-ops`），或用 Session Manager 搭配一台跳板機，再用 `psql` 連線。
+資料庫在私有子網，從外面連不進去。用 ECS Exec 進到一個暫時的容器（SG 用 `veilway-ops-sg`），或用 Session Manager 搭配一台跳板機，再用 `psql` 連線。
 
 **先用主帳號連到預設的 `postgres` 資料庫：**
 
@@ -989,7 +1135,7 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
    - 部署：dev 可用單節點；prod 選 **Multi-AZ** 並開啟自動容錯移轉（或直接用 Serverless）
    - **Encryption in transit：開啟**；**Encryption at rest：開啟**（用 `veilway-data`）
    - 驗證：開啟 **AUTH** 或 RBAC 使用者，密碼存進 Secrets Manager（`veilway/<env>/cache`）
-   - SG：`sg-cache`
+   - SG：`veilway-cache-sg`
 
 ### 存放內容規劃
 
@@ -1121,10 +1267,10 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 
 | 名稱 | 類型 | 階段 | 用途 | SG | Task role |
 | --- | --- | --- | --- | --- | --- |
-| `veilway-api` | service | 1 | 業務 API、租戶管理、媒體上傳 | `sg-api` | `veilway-api-task` |
-| `veilway-migrate` | 單次 task | 1 | 執行資料庫 migration | `sg-ops` | `veilway-migrate-task` |
-| `veilway-provision` | 單次 task | 1 | 平台開通工具：建立租戶、租戶金鑰、第一位管理員 | `sg-ops` | `veilway-provision-task` |
-| `veilway-gateway` | service | **2** | 隱道閘道：唯一能連到外部模型的元件 | `sg-gateway` | `veilway-gateway-task` |
+| `veilway-api` | service | 1 | 業務 API、租戶管理、媒體上傳 | `veilway-api-sg` | `veilway-api-task` |
+| `veilway-migrate` | 單次 task | 1 | 執行資料庫 migration | `veilway-ops-sg` | `veilway-migrate-task` |
+| `veilway-provision` | 單次 task | 1 | 平台開通工具：建立租戶、租戶金鑰、第一位管理員 | `veilway-ops-sg` | `veilway-provision-task` |
+| `veilway-gateway` | service | **2** | 隱道閘道：唯一能連到外部模型的元件 | `veilway-gateway-sg` | `veilway-gateway-task` |
 
 > **為什麼閘道要獨立**：SG 和 IAM role 都是以 task 為單位設定。閘道如果和業務 API 跑在同一個容器裡，第二階段「只有閘道能連到 PrivateLink endpoint、只有閘道的 role 能呼叫模型」就無法做到。
 
@@ -1155,7 +1301,7 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 5. **Task definition**：`veilway-migrate`、`veilway-provision` 同樣方式建立，log group 分別為 `/veilway/<env>/migrate`、`/veilway/<env>/provision`。
 6. **Service** → **Create**（`veilway-api`）：
    - Desired tasks：dev 1；**prod 至少 2**
-   - 子網：**私有應用子網**；**Public IP：關閉**；SG：`sg-api`
+   - 子網：**私有應用子網**；**Public IP：關閉**；SG：`veilway-api-sg`
    - 開啟 **Deployment circuit breaker** 和 **rollback**（部署失敗時自動退回上一版）
    - Load balancer 在第 10 步建立後再接上（也可以先建 ALB 再建 service）
 
@@ -1184,7 +1330,7 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
    - Protocol / Port：HTTP 8080
    - Health check：`/healthz`
 2. **EC2** → **Load balancers** → **Create Application Load Balancer**：
-   - Scheme：Internet-facing；子網：**公有子網**；SG：`sg-alb`
+   - Scheme：Internet-facing；子網：**公有子網**；SG：`veilway-alb-sg`
    - Listener **HTTPS 443**：使用第 2 步在**台北**申請的憑證
    - 預設動作：**回傳固定的 403**
    - 新增一條規則：**標頭 `X-Origin-Verify` 等於 `<一段隨機密鑰>`** 時，才轉送到 target group
@@ -1294,7 +1440,7 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 2. **後端流程**：測試（含跨租戶測試、RLS 檢查）→ 建置 ARM64 映像 → 推到 ECR（標籤用 commit SHA）→ **執行 migration** → 更新 ECS task definition → 部署 service
 3. **資料庫 migration** ⚠️ GitHub 的 runner 在 VPC 外面，**連不到 RDS**：
    - 把 migration 打包成 `veilway-migrate` 映像。
-   - 部署流程用 `aws ecs run-task` 在私有應用子網啟動它（SG `sg-ops`），等待結束，**exit code 不是 0 就中止部署**。
+   - 部署流程用 `aws ecs run-task` 在私有應用子網啟動它（SG `veilway-ops-sg`），等待結束，**exit code 不是 0 就中止部署**。
    - 在新版程式上線前完成。
 4. **前台流程**：測試 → 建置 → `s3 sync` → CloudFront invalidation
 5. **環境保護**：在 GitHub 的 Environments 設定 prod 需要人工核准才能部署
@@ -1319,7 +1465,7 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 | Stack | 內容 | 區域 |
 | --- | --- | --- |
 | `GlobalStack` | us-east-1 的 ACM 憑證（CloudFront、Cognito 自訂網域共用）、CloudFront 用的 WAF | us-east-1 |
-| `NetworkStack` | VPC、子網、NAT、VPC endpoint、SG（含第二階段的 `sg-gateway` 預留開關） | 台北 |
+| `NetworkStack` | VPC、子網、NAT、VPC endpoint、SG（含第二階段的 `veilway-gateway-sg` 預留開關） | 台北 |
 | `DataStack` | KMS、RDS、ElastiCache、Secrets | 台北 |
 | `AuthStack` | Cognito、Pre token generation 與 Post authentication Lambda | 台北 |
 | `AppStack` | ECR、ECS cluster、Service Connect namespace、ALB、`veilway-api` service、`veilway-migrate` 與 `veilway-provision` task | 台北 |
@@ -1372,6 +1518,9 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 | Budgets 篩選「連結帳戶」找不到新帳號 | 無法替環境帳號建立預算 | 進入各帳號自己建立（1.5） |
 | 委派子網域時 prod 的 NS 記錄值貼錯 | 子網域解析不到，憑證無法驗證 | 用 `dig` 比對（2.3） |
 | 租戶取名 `dev`、`staging` | 和環境子網域衝突 | 加入保留名稱（第 0 步） |
+| 安全群組名稱用 `sg-` 開頭 | 建立時被拒絕 | 改用 `veilway-<用途>-sg`（3.7） |
+| 建安全群組時 VPC 選到預設 VPC | 之後建 RDS、ALB 時找不到 | 選 `veilway-<環境>`，並刪除預設 VPC（3.5） |
+| 練習完沒刪 NAT | 每月持續計費約 35～45 美元 | 3.8 |
 | CloudTrail bucket 先加禁止刪除政策才設生命週期 | 生命週期、版本控制都改不了 | 依 1.6 B 的順序設定 |
 | 手動建的環境想直接轉成 IaC | 無法用 `cdk destroy` 刪除，重建演練做不了 | 手動練習放 sandbox 帳號（怎麼使用這份手冊） |
 | CloudFront、Cognito 自訂網域的憑證或 WAF 建在台北 | 設定畫面選不到 | 都要建在 us-east-1（第 2、11 步） |
@@ -1413,7 +1562,7 @@ dev 環境放著不用也會持續計費的項目：**NAT Gateway、RDS、Elasti
 
 | 項目 | 第一階段的狀態 | 第二階段要做 |
 | --- | --- | --- |
-| 隱道閘道 | IaC 有 `GatewayStack` 的位置、`sg-gateway` 預留、Service Connect namespace 已建立 | 建立 `veilway-gateway` service 與 task role；API 透過 Service Connect 呼叫閘道 |
+| 隱道閘道 | IaC 有 `GatewayStack` 的位置、`veilway-gateway-sg` 預留、Service Connect namespace 已建立 | 建立 `veilway-gateway` service 與 task role；API 透過 Service Connect 呼叫閘道 |
 | 出口管控 | 應用子網經 NAT 可以完整對外（已知限制） | egress proxy 或 Network Firewall 加網域 allowlist，**不放行任何 AI 服務的網域**；只有閘道能連 PrivateLink endpoint |
 | 租戶金鑰 | 做法已定案、開通工具能建立 | 對照表用租戶金鑰加密 |
 | 方案與額度 | `plans` 資料表已建立 | 閘道計量寫入、ElastiCache 做即時額度 |
