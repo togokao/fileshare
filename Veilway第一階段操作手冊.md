@@ -22,7 +22,7 @@
   2. 接著在第 14 步把設定寫成 IaC。**dev、staging、prod 一開始就用 IaC 建立**，不要拿手動建的環境轉成 IaC，因為手動建立的資源沒辦法用 `cdk destroy` 刪除，重建演練也做不了。
   3. 之後一律只改 IaC，不再手動點主控台。
 - 主控台路徑寫成「服務 → 頁面 → 按鈕」。
-- 本手冊中的 `example.com` 請換成你們的網域，`<…>` 是要自行填入的值。
+- 本手冊中的 `example.com` 請換成你們的網域（Veilway 使用 `veilway.app`），`<…>` 是要自行填入的值。在 dev、staging、sandbox 環境，`example.com` 代表該環境的子網域，例如 dev 是 `dev.example.com`（見第 2 步）。
 - 標示 ⚠️ 的是容易出錯、事後很難改的地方。
 
 ### 名詞速查
@@ -50,8 +50,8 @@
 | IaC 工具 | **AWS CDK（C#）** | 團隊用 C#，CDK 可以用同一種語言寫基礎設施；Terraform 也可以，二選一即可 |
 | 帳號結構 | **每個環境一個 AWS 帳號**（sandbox、dev、staging、prod） | 用 AWS Organizations 管理。環境之間權限和帳單完全隔開。sandbox 給手動練習用，可以隨時清空 |
 | 區域 | **台北 ap-east-2** | 少數服務必須在 us-east-1（見第 2、11 步） |
-| 網域 | 例如 `example.com`；租戶用 `<租戶>.example.com` | 要能管理 DNS，建議 DNS 放在 Route 53 |
-| 子網域命名規則 | 只允許小寫英數字和連字號，長度 3～63；**保留名稱**：`www`、`api`、`admin`、`app`、`auth`、`login`、`origin-api`、`static`、`mail` | 子網域會成為租戶的識別，事後很難改。`auth`、`login`、`origin-api` 在本手冊有固定用途（第 7、10、11 步） |
+| 網域 | **`veilway.app`**（已在 Route 53 購買，放在 veilway-prod）；租戶用 `<租戶>.veilway.app`；其他環境用子網域（`dev.veilway.app` 等） | 一個平台一個網域，不和其他產品共用。詳見第 2 步 |
+| 子網域命名規則 | 只允許小寫英數字和連字號，長度 3～63；**保留名稱**：`www`、`api`、`admin`、`app`、`auth`、`login`、`origin-api`、`static`、`mail`、`sandbox`、`dev`、`staging` | 子網域會成為租戶的識別，事後很難改。`auth`、`login`、`origin-api` 在本手冊有固定用途（第 7、10、11 步）；`sandbox`、`dev`、`staging` 是各環境的子網域，和 prod 的租戶子網域在同一層，租戶不能使用 |
 | 使用者與租戶 | **一位使用者只屬於一個租戶**；email 在整個平台唯一 | 同一個人要進兩個租戶，就用兩個 email 開兩個帳號。這個決定會寫進 Cognito 的設定，事後很難改 |
 | 後端服務切分 | 第一階段只有 **API service**；第二階段新增獨立的 **閘道 service** | 閘道必須有自己的 SG 和 task role，第二階段的出口鎖定才有效（見第 9 步） |
 | 出口管控 | **第二階段**再加 egress proxy 或 Network Firewall | 第一階段應用子網經 NAT 可以完整對外，這是已知、暫時的狀態（見第 3 步） |
@@ -552,30 +552,172 @@ Identity Center 只能有一個**主要區域**，建立後**不能更改**，�
 
 ## 第 2 步：網域與憑證
 
-**目的**：準備 DNS 和 HTTPS 憑證。憑證要等 DNS 驗證，越早申請越好。
+**目的**：準備網域、各環境的 DNS 和 HTTPS 憑證。憑證要等 DNS 驗證，越早申請越好。
 
-### 操作
+### 2.1 網域規劃
 
-1. **DNS**
-   - **Route 53** → **Hosted zones** → **Create hosted zone** → `example.com`。
-   - 如果網域在其他註冊商，把註冊商的 NS 記錄改成 Route 53 給的四筆 NS。
-   - 建議每個環境用不同的網域或子網域（例如 dev 用 `dev.example.net`），避免 dev 的租戶子網域和正式環境混在一起。
-2. **us-east-1 的憑證**（給 CloudFront 和 Cognito 自訂網域） ⚠️ **必須在 us-east-1（維吉尼亞北部）申請**
-   - 切換區域到 **US East (N. Virginia)** → **Certificate Manager** → **Request** → **Request a public certificate**。
-   - 網域名稱填兩筆：`example.com` 和 `*.example.com`。
-   - 驗證方式選 **DNS validation** → **Create records in Route 53**。
-3. **台北的憑證**（給 ALB）
-   - 切回 **台北** → **Certificate Manager** → 同樣申請 `example.com`、`*.example.com`，用 DNS 驗證。
+#### 網域代表什麼
+
+網域是使用者在網址列看到的品牌。Veilway 的租戶網址是 `<租戶>.<網域>`，所以這個網域**專門給 Veilway 平台使用**。
+
+- **一個平台一個網域**：其他獨立產品（例如另一個業務平台）另外購買網域，不和 Veilway 共用。cookie、憑證、DNS 完全隔離，一個平台出事不會波及其他平台，也方便之後各自交接。每個網域每年約 15～20 美元。
+- **客戶是 Veilway 的租戶時，不用另外買網域**：例如保險業務、學校客戶就是 `insurance.veilway.app`、`cycu.veilway.app`。客戶想用自己的網域（例如 `ai.cycu.edu.tw`）時，之後再做「客戶自訂網域」功能，不在第一階段範圍。
+
+#### 後綴怎麼選
+
+| | `.com` | `.app` | `.io` |
+| --- | --- | --- | --- |
+| 類型 | 通用頂級網域 | 新通用頂級網域，Google 營運 | 國家代碼網域（英屬印度洋領地） |
+| 一般人熟悉度 | 最高 | 中等，科技業熟悉 | 科技圈熟悉，一般人較陌生 |
+| 每年價格（約） | 15 美元 | 20 美元 | 70 美元以上 |
+| 強制 HTTPS | 否 | **是**（瀏覽器內建） | 否 |
+| 長期穩定性 | 最穩定 | 穩定 | 主權可能移轉，有不確定性 |
+
+順序建議：`.com` → `.app` → 其他。`.tw`、`.com.tw` 在 Route 53 買不到，要在台灣的註冊商購買，再把 NS 指到 Route 53。
+
+**Veilway 使用 `veilway.app`**。`.app` 強制 HTTPS，正好符合全站 HTTPS 的設計；唯一限制是不能用 HTTP 測試這個網域，開發在本機或 dev 環境進行即可。
+
+#### 各環境的網域與帳號
+
+主網域放在 **veilway-prod**，其他環境用子網域，並把子網域**委派**給各自的帳號管理：
+
+| 環境 | 網域 | 託管區域放在 | 租戶網址範例 |
+| --- | --- | --- | --- |
+| prod | `veilway.app` | veilway-prod | `acme.veilway.app` |
+| staging | `staging.veilway.app` | veilway-staging | `acme.staging.veilway.app` |
+| dev | `dev.veilway.app` | veilway-dev | `acme.dev.veilway.app` |
+| sandbox | `sandbox.veilway.app` | veilway-sandbox | 練習用 |
+
+- 主網域放 prod：正式環境最重要，權限也最嚴格。**不要**放在管理帳號。
+- 委派之後，dev 的人可以自由調整 `dev.veilway.app` 底下的 DNS，碰不到 prod。
+- 後續步驟寫的 `example.com`，在各環境就換成該環境的網域。例如 dev 的 `auth.example.com` 是 `auth.dev.veilway.app`，都在 `*.dev.veilway.app` 憑證的範圍內。
+- `sandbox`、`dev`、`staging` 已加入第 0 步的保留名稱，租戶不能使用。
+
+### 2.2 購買網域（在 veilway-prod）
+
+1. 入口網站 → **`veilway-prod`** → **AdministratorAccess**。
+2. **Route 53** → 左側 **已註冊的網域** → **註冊網域**。
+3. 搜尋名稱 → 選一個可用的後綴 → **選取** → **繼續結帳**。
+4. 設定：
+
+| 欄位 | 設定 |
+| --- | --- |
+| 期間 | 1 年 |
+| 自動續約 | **開啟**，過期會被別人搶走 |
+| 聯絡人資訊 | 填真實資料，email 要能收信 |
+| 隱私權保護 | **開啟**，公開的 WHOIS 查詢不會顯示姓名、地址 |
+
+5. **提交**。費用算在組織的帳單上。
+
+購買後：
+
+- ⚠️ **15 天內**點 ICANN 驗證信（主旨類似「Verify your email address」）裡的連結，否則網域會被暫停。
+- 註冊通常幾分鐘到幾小時完成。**Route 53** → **已註冊的網域** 顯示完成後，**託管區域** 會自動出現 `veilway.app`（含 NS、SOA 兩筆記錄）。
+
+### 2.3 委派子網域給各環境帳號
+
+先做目前要用的 sandbox 和 dev，staging 等快上線再做，步驟相同。Route 53 是**全域服務**，右上角顯示「全球」，不用選區域。
+
+以 sandbox 為例：
+
+**1. 在環境帳號建立託管區域**
+
+1. 入口網站 → **`veilway-sandbox`** → **AdministratorAccess**。
+2. **Route 53** → **託管區域** → **建立託管區域**：網域名稱 `sandbox.veilway.app`，類型 **公有託管區域** → **建立託管區域**。
+3. 點進去，把 **NS** 記錄的 4 行值複製下來，例如：
+
+```
+ns-123.awsdns-15.com.
+ns-456.awsdns-57.net.
+ns-789.awsdns-34.org.
+ns-1011.awsdns-12.co.uk.
+```
+
+**2. 在 prod 帳號加上委派記錄**
+
+1. 入口網站 → **`veilway-prod`** → **Route 53** → **託管區域** → `veilway.app` → **建立記錄**：
+
+| 欄位 | 設定 |
+| --- | --- |
+| 記錄名稱 | `sandbox`（自動組成 `sandbox.veilway.app`） |
+| 記錄類型 | **NS** |
+| 值 | 貼上剛才的 4 行，每行一個 |
+| TTL | `300`，確認沒問題後可改成 `172800`（2 天） |
+
+2. **建立記錄**。
+
+**3. 其他環境照做**：`veilway-dev` 建立 `dev.veilway.app` → 在 prod 新增名稱 `dev` 的 NS 記錄；staging 之後同樣做法。
+
+**4. 驗證委派**
+
+開 CloudShell（台北沒有 CloudShell，切到東京等其他區域）。CloudShell 預設沒有 `dig`，先安裝：
+
+```bash
+sudo dnf install -y bind-utils
+dig NS sandbox.veilway.app +short
+dig NS dev.veilway.app +short
+```
+
+不想安裝的話，改用 Google 的公開 DNS 查詢：
+
+```bash
+curl -s "https://dns.google/resolve?name=sandbox.veilway.app&type=NS" | python3 -m json.tool
+```
+
+| 結果 | 意思 |
+| --- | --- |
+| 4 行 `ns-xxx.awsdns-xx...`，和環境帳號託管區域的 NS 相同 | 委派成功 |
+| 沒有結果，或 `"Status": 3`（NXDOMAIN） | prod 的委派記錄還沒建、名稱打錯，或還在生效中，等幾分鐘再查 |
+| 有 4 行，但和環境帳號的 NS 不同 | prod 那筆 NS 記錄的值貼錯了 |
+
+### 2.4 申請憑證（在各環境帳號）
+
+每個環境申請**兩張**內容相同、區域不同的憑證：
+
+| 憑證 | 區域 | 給誰用 | 網域名稱（以 sandbox 為例） |
+| --- | --- | --- | --- |
+| 第 1 張 | **美國東部（維吉尼亞北部）us-east-1** | CloudFront、Cognito 自訂網域 | `sandbox.veilway.app`、`*.sandbox.veilway.app` |
+| 第 2 張 | **亞太地區（台北）** | ALB | 同上 |
+
+CloudFront 和 Cognito 只能用 us-east-1 的憑證，ALB 只能用同區域（台北）的憑證，所以要各申請一張。萬用憑證涵蓋 `acme.`、`auth.`、`login.`、`origin-api.` 等所有**一層**子網域。
+
+**第 1 張：us-east-1**
+
+1. 入口網站 → **`veilway-sandbox`** → **AdministratorAccess**。
+2. ⚠️ 右上角區域切到 **美國東部（維吉尼亞北部）us-east-1**，這步最容易忘。
+3. **Certificate Manager** → **請求** → **請求公有憑證** → **下一步**：
+
+| 欄位 | 設定 |
+| --- | --- |
+| 完整網域名稱 | `sandbox.veilway.app` |
+| 新增另一個名稱 | `*.sandbox.veilway.app` |
+| 允許匯出 | **停用**（啟用會另外收費，用不到） |
+| 驗證方法 | **DNS 驗證** |
+| 金鑰演算法 | **RSA 2048**（預設） |
+
+4. **請求**。畫面顯示「已成功請求具有 ID … 的憑證」，狀態是「等待驗證」。
+5. 按 **檢視憑證** → 「網域」區塊按 **在 Route 53 中建立記錄** → 兩個網域都勾選 → **建立記錄**。兩個名稱共用同一筆驗證記錄，只建立一筆是正常的。
+
+**第 2 張：台北**
+
+1. **不用等第 1 張完成**，只要第 1 張的驗證記錄已經建好，就可以切到 **亞太地區（台北）**。
+2. 重複上面第 3～5 步。按 **在 Route 53 中建立記錄** 時如果顯示**已存在**，直接略過：同一個帳號、同一個網域的驗證記錄在各區域相同，兩張會各自完成驗證。
+
+**其他環境**：`veilway-dev` 申請 `dev.veilway.app`、`*.dev.veilway.app`，us-east-1 和台北各一張。prod 的 `veilway.app`、`*.veilway.app` 等快上線時在 veilway-prod 申請。
 
 ### 驗證
 
-- [ ] 兩張憑證的狀態都是 **Issued**（一張在 us-east-1，一張在台北）
+- [ ] `veilway.app` 註冊完成，ICANN 驗證信已確認
+- [ ] veilway-prod 的 `veilway.app` 託管區域裡，有 `sandbox`、`dev` 兩筆 NS 委派記錄
+- [ ] `dig NS sandbox.veilway.app`、`dig NS dev.veilway.app` 回傳的名稱伺服器和各環境帳號的託管區域一致
+- [ ] sandbox、dev 帳號各有兩張憑證（us-east-1、台北），狀態都是 **已發行**（Issued），通常幾分鐘、最久約 30 分鐘
 
 ### 注意事項
 
 - ⚠️ CloudFront 和 Cognito 自訂網域都只能用 **us-east-1** 的憑證。在台北申請的憑證，設定畫面選不到。
-- ⚠️ 萬用憑證 `*.example.com` **只涵蓋一層**：`acme.example.com` 可以，`api.acme.example.com` 不行，`example.com` 本身也不包含，所以要另外列出。
-- ACM 憑證會自動續約，前提是 DNS 驗證用的 CNAME 記錄不能刪掉。
+- ⚠️ 萬用憑證只涵蓋**一層**：`*.dev.veilway.app` 涵蓋 `acme.dev.veilway.app`，不涵蓋 `api.acme.dev.veilway.app`；`dev.veilway.app` 本身也不包含，所以要另外列出。
+- ⚠️ **不要刪除** Route 53 裡的驗證 CNAME 記錄（名稱以 `_` 開頭）。ACM 每年自動續約要用到它，刪掉的話憑證會在到期時失效。
+- 公有憑證免費；每個託管區域每月約 0.5 美元。
 
 ---
 
@@ -1228,6 +1370,8 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 | 成員帳號沒開台北就指派 Identity Center 許可集 | 指派一直卡在「進行中」，且無法移除 | 先完成 1.3，再做 1.4 G |
 | 在台北開 CloudShell | 顯示 Region Unsupported | 切到東京再開（1.3 B） |
 | Budgets 篩選「連結帳戶」找不到新帳號 | 無法替環境帳號建立預算 | 進入各帳號自己建立（1.5） |
+| 委派子網域時 prod 的 NS 記錄值貼錯 | 子網域解析不到，憑證無法驗證 | 用 `dig` 比對（2.3） |
+| 租戶取名 `dev`、`staging` | 和環境子網域衝突 | 加入保留名稱（第 0 步） |
 | CloudTrail bucket 先加禁止刪除政策才設生命週期 | 生命週期、版本控制都改不了 | 依 1.6 B 的順序設定 |
 | 手動建的環境想直接轉成 IaC | 無法用 `cdk destroy` 刪除，重建演練做不了 | 手動練習放 sandbox 帳號（怎麼使用這份手冊） |
 | CloudFront、Cognito 自訂網域的憑證或 WAF 建在台北 | 設定畫面選不到 | 都要建在 us-east-1（第 2、11 步） |
