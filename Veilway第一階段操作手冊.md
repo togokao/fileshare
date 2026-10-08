@@ -782,7 +782,22 @@ CloudFront 和 Cognito 只能用 us-east-1 的憑證，ALB 只能用同區域（
 | `…-private3-…a` | `veilway-sandbox-data-a` |
 | `…-private4-…b` | `veilway-sandbox-data-b` |
 
-AZ 字尾依實際顯示（可能是 `a`、`b`，也可能是 `a`、`c`）。路由表也照同樣規則改名，例如 `…-rtb-private3-…` 改成 `veilway-sandbox-rtb-data-a`。
+AZ 字尾依實際顯示（可能是 `a`、`b`，也可能是 `a`、`c`）。
+
+**路由表也要改名**：**VPC** → **路由表**，精靈會產生 6 張，對照「明確子網路關聯」欄位確認每張給哪個子網用：
+
+| 精靈產生的名稱 | 改成 | 給誰用 |
+| --- | --- | --- |
+| `…-rtb-public` | 不用改 | 兩個公有子網共用 |
+| `…-rtb-private1-…a` | `veilway-sandbox-rtb-app-a` | app-a |
+| `…-rtb-private2-…b` | `veilway-sandbox-rtb-app-b` | app-b |
+| `…-rtb-private3-…a` | `veilway-sandbox-rtb-data-a` | data-a |
+| `…-rtb-private4-…b` | `veilway-sandbox-rtb-data-b` | data-b |
+| `–`（沒有名稱） | `veilway-sandbox-rtb-main` | VPC 的**主路由表** |
+
+- 改名方式：滑鼠移到 **Name** 欄位會出現鉛筆圖示，點下去直接輸入 → ✓；或點選路由表 → **標籤** → **管理標籤** → 修改 `Name`。
+- **主路由表**是建立 VPC 時自動產生的，沒有明確指定路由表的子網會自動使用它。精靈建立的子網都已各自指定，所以目前沒有子網在用。它無法刪除，取名方便辨識即可。
+- 確認主路由表的 **路由** 分頁**只有** `10.0.0.0/16 → local` 一條。這樣之後新建的子網即使忘了指定路由表，也不會意外連到外網。
 
 ### 3.4 讓資料子網完全不能連外 ⚠️
 
@@ -906,6 +921,7 @@ sandbox 帳號本身一直存在、免費，要刪的是帳號裡**會持續計�
 ### 驗證
 
 - [ ] VPC `veilway-<環境>`（`10.0.0.0/16`）有正確數量的子網，名稱都已改好
+- [ ] 路由表名稱都已改好；主路由表只有 `local` 一條路由
 - [ ] 資料子網的路由表裡**沒有** `0.0.0.0/0`
 - [ ] 應用子網的路由表有 `0.0.0.0/0 → nat-…`（NAT 刪除期間顯示黑洞）
 - [ ] 台北的預設 VPC 已刪除
