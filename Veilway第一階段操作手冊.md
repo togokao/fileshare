@@ -941,28 +941,144 @@ sandbox 帳號本身一直存在、免費，要刪的是帳號裡**會持續計�
 
 **目的**：準備加密金鑰和密碼的存放位置。
 
-### 操作
+以下在 **`veilway-<環境>` 帳號、亞太地區（台北）** 操作，不需要 NAT。
 
-1. **KMS** → **Customer managed keys** → **Create key**，建立平台用的金鑰：
-   - `veilway-data`：加密 RDS、S3、ElastiCache
-   - `veilway-logs`：加密 CloudWatch Logs
-   - 開啟 **Automatic key rotation**（每年自動輪替）
-2. **租戶金鑰的機制**（第一階段只建立機制；真正用到是第二階段的對照表）
-   - 先決定做法（建議在租戶數量規劃確定後定案）：
+### 4.1 要建立的金鑰
 
-   | 做法 | 優點 | 缺點 |
-   | --- | --- | --- |
-   | 每個租戶一把 KMS key | 隔離最清楚，可以單獨停用某租戶的金鑰 | 每把金鑰每月固定費用；租戶多時費用與數量上限要評估 |
-   | 一把主金鑰 + 每個租戶各自的資料金鑰（envelope encryption） | 費用固定 | 要自己管理資料金鑰的儲存與輪替 |
+| 別名 | 用途 | 金鑰政策 |
+| --- | --- | --- |
+| `veilway-data` | 加密 RDS、ElastiCache、應用程式的 S3 檔案 | **保持預設** |
+| `veilway-logs` | 加密 CloudWatch Logs | **要另外允許 CloudWatch Logs**（4.3） |
 
-   - 不論哪一種，**建立金鑰的權限只給「平台開通工具」**（第 9 步的 `veilway-provision` task），API 的 task role 只有使用金鑰（Encrypt／Decrypt）的權限，**沒有** `kms:CreateKey`。
-   - 每個租戶一把 key 時：別名 `alias/veilway/tenant/<tenant_id>`，金鑰 ARN 存進 `tenants.kms_key_arn`，金鑰政策只允許後端的 task role 使用。
-3. **Secrets Manager**：這一步先不手動建立，RDS 的主帳號密碼會在第 5 步由 RDS 自動放進來。
+每把金鑰每月約 1 美元；開啟自動輪替後，前兩次輪替各會多一點費用。
+
+#### 為什麼只有 `veilway-logs` 要改金鑰政策
+
+差別在於「誰去使用這把金鑰」：
+
+| 金鑰 | 使用方式 | 預設政策夠不夠 |
+| --- | --- | --- |
+| `veilway-data` | RDS、ElastiCache、S3 是**代替建立資源的人**使用金鑰，用的是建立者的權限 | **夠** |
+| `veilway-logs` | CloudWatch Logs 用 **AWS 服務自己的身分**（`logs.ap-east-2.amazonaws.com`）直接使用金鑰 | **不夠**，要另外允許 |
+
+主控台產生的預設金鑰政策包含兩部分：
+
+1. **帳號本身**（`arn:aws:iam::<帳號ID>:root`）有完整權限，意思是「交給 IAM 管理」：只要某個角色的 IAM 政策允許使用這把金鑰，它就能用。所以第 9 步 ECS task role 要使用 `veilway-data` 時，只要在 **task role 的 IAM 政策**加權限，不用改金鑰政策。
+2. 建立時選的**金鑰管理員**可以管理金鑰。
+
+> ⚠️ **例外**：凡是由 AWS 服務以**自己的身分**存取的資源（例如 CloudWatch Logs、CloudFront 透過 OAC 讀 S3），用客戶受管金鑰加密時都要在金鑰政策裡另外允許該服務。所以第 11 步的**前台 S3 bucket 使用 S3 預設加密（SSE-S3）**，不用 `veilway-data`；前台是公開的網頁靜態檔，不是機密資料。
+
+### 4.2 建立 `veilway-data`
+
+**KMS** → 左側 **客戶受管金鑰** → **建立金鑰**。
+
+**步驟 1：設定金鑰**
+
+| 欄位 | 設定 |
+| --- | --- |
+| 金鑰類型 | **對稱** |
+| 金鑰用途 | **加密和解密** |
+| 進階選項 → 金鑰材料來源 | **KMS**（預設） |
+| 進階選項 → 區域性 | **單一區域金鑰**（預設） |
+
+**步驟 2：新增標籤**
+
+| 欄位 | 設定 |
+| --- | --- |
+| 別名 | `veilway-data` |
+| 描述 | `Encrypt RDS, S3, ElastiCache`（建議用英文） |
+| 標籤（選填） | `Project` = `veilway`、`Env` = `<環境>` |
+
+標籤輸入方式：在「標籤金鑰」輸入 `Project` → 按 Enter 或點下方「使用：Project」確認 → 在「標籤值」輸入 `veilway` → 確認 → **新增標籤** 加下一組。「新增唯一的金鑰」只是提示：同一把 KMS 金鑰上，每個標籤名稱只能出現一次。各環境已經用帳號分開，帳單本來就分開列出，標籤現階段不是必要的；之後用 IaC 建立時會自動加上。
+
+**步驟 3：定義金鑰管理許可**
+
+- 金鑰管理員：勾選名稱類似 **`AWSReservedSSO_AdministratorAccess_xxxx`** 的角色（從 Identity Center 入口網站登入時使用的角色）。
+- **允許金鑰管理員刪除此金鑰**：sandbox、dev 保留勾選；**prod 取消勾選**。
+
+**步驟 4：定義金鑰用量許可**
+
+**先不用選**。ECS task role 在第 9 步用 IAM 政策授權；RDS、ElastiCache 用建立者的權限使用金鑰。
+
+**步驟 5：檢閱** → **完成**。
+
+**開啟自動輪替**：點進 `veilway-data` → **金鑰輪換** 分頁 → **編輯** → 勾選 **自動輪換此 KMS 金鑰** → 輪替週期 **365 天** → **儲存**。輪替後舊資料仍能解密，不用重新加密。
+
+### 4.3 建立 `veilway-logs` 並修改金鑰政策
+
+照 4.2 再建一把，差別：別名 `veilway-logs`、描述 `Encrypt CloudWatch Logs`。同樣開啟自動輪替。
+
+**修改金鑰政策**：
+
+1. 點進 `veilway-logs` → **金鑰政策** 分頁 → **切換到政策檢視** → **編輯**。
+2. 找到 `"Statement": [`，在它後面換行，貼上下面這段。把 `<帳號ID>` 換成該環境帳號的 12 位數 ID（右上角帳號名稱的下拉選單可以看到），**最後的逗號要保留**：
+
+```json
+    {
+      "Sid": "AllowCloudWatchLogs",
+      "Effect": "Allow",
+      "Principal": { "Service": "logs.ap-east-2.amazonaws.com" },
+      "Action": [
+        "kms:Encrypt*",
+        "kms:Decrypt*",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:Describe*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "kms:EncryptionContext:aws:logs:arn": "arn:aws:logs:ap-east-2:<帳號ID>:log-group:*"
+        }
+      }
+    },
+```
+
+3. **儲存變更**。原本的兩段（帳號根身分、金鑰管理員）**不要刪除或修改**。
+
+`Condition` 限制只有這個帳號在台北的 log group 能使用這把金鑰。
+
+### 4.4 租戶金鑰：先決定做法，不用建立
+
+第一階段只決定做法；真正用到是第二階段的對照表，現在不用建立任何租戶金鑰。
+
+| 做法 | 優點 | 缺點 |
+| --- | --- | --- |
+| 每個租戶一把 KMS 金鑰 | 隔離最清楚，可以單獨停用某租戶的金鑰 | 每把每月約 1 美元；租戶多時費用與帳號內的金鑰數量上限要評估 |
+| 一把主金鑰 + 每個租戶各自的資料金鑰（envelope encryption） | 費用固定 | 要自己管理資料金鑰的儲存與輪替 |
+
+建議在租戶數量規劃確定、第二階段開始前定案。不論哪一種：
+
+- **建立金鑰的權限只給「平台開通工具」**（第 9 步的 `veilway-provision` task）。API 的 task role 只有使用金鑰（Encrypt／Decrypt）的權限，**沒有** `kms:CreateKey`。
+- 每個租戶一把金鑰時：別名 `alias/veilway/tenant/<tenant_id>`，金鑰 ARN 存進 `tenants.kms_key_arn`，金鑰政策只允許後端的 task role 使用。
+
+### 4.5 Secrets Manager：這一步不用做
+
+RDS 的主帳號密碼會在第 5 步由 RDS 自動存進 Secrets Manager；其他密碼（應用程式帳號、快取 AUTH、ALB 密鑰標頭）在各自的步驟建立。
+
+### 4.6 刪除程序
+
+⚠️ KMS 金鑰**不能立即刪除**，只能排程在 7～30 天後刪除，期間可以取消。刪除後，用它加密的資料**永遠無法解開**。
+
+sandbox 整輪練習結束時：
+
+1. 先確認用這把金鑰加密的資源都已刪除：RDS（含快照）、ElastiCache、log group、S3 物件等。
+2. **KMS** → **客戶受管金鑰** → 選金鑰 → **金鑰動作** → **排程金鑰刪除** → 等待期間填 **7** 天 → 勾選確認 → **排程刪除**。
+3. 等待期間內發現還有資料需要，可以選金鑰 → **金鑰動作** → **取消金鑰刪除**，取消後金鑰會是「已停用」，要再手動**啟用**。
+
+暫時不用時不需要刪除：金鑰費用很低，刪除後重建反而要重新設定政策和輪替。
+
+### 驗證
+
+- [ ] **KMS** → **客戶受管金鑰**：有 `veilway-data`、`veilway-logs` 兩把，狀態「已啟用」
+- [ ] 兩把的 **金鑰輪換** 都已開啟，週期 365 天
+- [ ] `veilway-logs` 的金鑰政策裡有 `AllowCloudWatchLogs`，帳號 ID 正確
+- [ ] 金鑰管理員是 Identity Center 的管理員角色
 
 ### 注意事項
 
-- KMS 金鑰刪除時有 7 到 30 天的等待期，刪除後用它加密的資料就永遠無法解開，刪除前要特別小心。
-- 建立金鑰時設定的金鑰政策如果寫錯，可能連管理員都無法再管理這把金鑰。政策裡一定要保留帳號根身分的管理權限。
+- 金鑰政策寫錯，可能連管理員都無法再管理這把金鑰。政策裡一定要保留帳號根身分（`:root`）那一段。
+- 金鑰和使用它的資源必須在**同一區域**。這兩把都建在台北。
 
 ---
 
@@ -1374,7 +1490,7 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 ### 操作
 
 1. **S3 前台 bucket**（台北）
-   - 名稱例如 `veilway-dev-web`；**Block all public access：開啟**；加密：開啟
+   - 名稱例如 `veilway-dev-web`；**Block all public access：開啟**；加密：**SSE-S3（S3 預設）**，不要用 `veilway-data`，否則 CloudFront 透過 OAC 讀取時會被 KMS 拒絕（見 4.1）
 2. **WAF** ⚠️ **必須建在 us-east-1，範圍選 CloudFront（Global）**
    - **WAF & Shield** → **Web ACLs** → **Create** → Resource type：**Amazon CloudFront distributions**
    - 加入 AWS managed rules：Core rule set、Known bad inputs、IP reputation
@@ -1537,6 +1653,8 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 | 安全群組名稱用 `sg-` 開頭 | 建立時被拒絕 | 改用 `veilway-<用途>-sg`（3.7） |
 | 建安全群組時 VPC 選到預設 VPC | 之後建 RDS、ALB 時找不到 | 選 `veilway-<環境>`，並刪除預設 VPC（3.5） |
 | 練習完沒刪 NAT | 每月持續計費約 35～45 美元 | 3.8 |
+| `veilway-logs` 沒加 CloudWatch Logs 的金鑰政策 | log group 無法使用這把金鑰加密 | 4.3 |
+| 前台 S3 bucket 用 KMS 金鑰加密 | CloudFront 讀不到檔案，回 403 | 前台用 SSE-S3（4.1、第 11 步） |
 | CloudTrail bucket 先加禁止刪除政策才設生命週期 | 生命週期、版本控制都改不了 | 依 1.6 B 的順序設定 |
 | 手動建的環境想直接轉成 IaC | 無法用 `cdk destroy` 刪除，重建演練做不了 | 手動練習放 sandbox 帳號（怎麼使用這份手冊） |
 | CloudFront、Cognito 自訂網域的憑證或 WAF 建在台北 | 設定畫面選不到 | 都要建在 us-east-1（第 2、11 步） |
