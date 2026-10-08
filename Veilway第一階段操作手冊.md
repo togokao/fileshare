@@ -83,14 +83,13 @@
    - 刪除 root 的存取金鑰（如果有）。之後**不再用 root 做日常操作**。
 2. **建立組織與環境帳號**（詳細步驟見下方「1.2 建立組織與環境帳號」）
    - **AWS Organizations** → **Create an organization** → 新增帳號：`veilway-sandbox`、`veilway-dev`、`veilway-staging`、`veilway-prod`。
-3. **人員登入改用 IAM Identity Center**（詳細步驟見下方「1.3 人員登入改用 IAM Identity Center」）
+3. **啟用台北區域** ⚠️（詳細步驟見下方「1.3 啟用台北區域」）
+   - 台北是「需要手動開啟」的區域（opt-in region），預設是關閉的。
+   - 管理帳號和 4 個環境帳號**都要**開啟，開啟需要幾分鐘到數小時。
+   - 必須在第 4 項 Identity Center **之前**完成，否則指派許可集時會卡住。
+4. **人員登入改用 IAM Identity Center**（詳細步驟見下方「1.4 人員登入改用 IAM Identity Center」）
    - **IAM Identity Center** → **Enable** → 建立使用者與群組 → 指派權限集（例如開發者在 sandbox、dev 有 `PowerUserAccess`，在 prod 只有唯讀）。
    - 每位成員都要設定 MFA。
-   - ⚠️ Identity Center 要建在台北時，管理帳號必須**先**完成第 4 項「啟用台北區域」。
-4. **啟用台北區域** ⚠️
-   - 台北是「需要手動開啟」的區域（opt-in region），預設是關閉的。
-   - 主控台右上角帳號名稱 → **Account** → **AWS Regions** → 找到 **Asia Pacific (Taipei)** → **Enable**。
-   - 每個環境帳號都要各自開啟，開啟需要幾分鐘到數小時。
 5. **費用告警**
    - **Billing and Cost Management** → **Budgets** → **Create budget** → 每個帳號一份每月預算，並設定在實際花費達 50%、80%、100% 時寄信通知。
 6. **稽核紀錄**
@@ -165,7 +164,59 @@
 
 這樣成員帳號的 root 就無法登入。真的需要 root 操作時，再從管理帳號臨時取得權限。
 
-### 1.3 人員登入改用 IAM Identity Center
+### 1.3 啟用台北區域
+
+**目的**：讓各帳號可以在台北建立資源。台北是 opt-in 區域，沒開啟前，該區域的所有資源都建不起來。
+
+⚠️ **順序很重要**：Identity Center 建在台北時，
+
+- 管理帳號沒開台北 → 無法在台北啟用 Identity Center。
+- 成員帳號沒開台北 → 指派許可集到該帳號時會一直卡在「進行中」，而且無法移除（見 1.4 G 的注意事項）。
+
+所以本項要在 1.4 之前，把**管理帳號和 4 個環境帳號全部**開好。
+
+#### A. 管理帳號（主控台）
+
+1. 右上角區域選單 → **管理區域**（或 右上角帳號名稱 → **帳戶** → **AWS 區域**）。
+2. 找到 **亞太地區（台北）ap-east-2** → 選取 → **啟用** → 確認。
+3. 狀態從「啟用中」變成「已啟用」，通常幾分鐘，最久可能數小時。
+
+> 區域選單打開時如果停在 **Local Zones** 分頁，那是個別城市的延伸據點，Veilway 用不到，切回 **區域** 分頁即可。在 Organizations 等全域服務的頁面，右上角會顯示「全球」，此時不能選區域，先進入任一區域服務（例如 IAM Identity Center）再切換。
+
+#### B. 4 個環境帳號（管理帳號用 CloudShell 一次處理）
+
+成員帳號的 root 已經收掉，從管理帳號統一開啟最方便。
+
+1. **先決條件**：**AWS Organizations** → **服務** → **AWS Account Management** → **啟用受信任存取**。
+   - 注意不要選到名稱很像的 **Account access manager**，那是管理 IAM 角色存取權的另一個服務。
+2. 開啟 **CloudShell**（主控台上方 `>_` 圖示）。
+   - ⚠️ 台北目前**沒有 CloudShell**，會顯示「Region Unsupported」。先把右上角區域切到**東京**（ap-northeast-1）再開啟。下面的指令都已指定台北，在哪個區域的 CloudShell 執行結果都一樣。
+3. 整段貼上執行，自動找出所有成員帳號（排除管理帳號）並啟用台北：
+
+```bash
+MGMT=$(aws organizations describe-organization --query Organization.MasterAccountId --output text)
+for id in $(aws organizations list-accounts --query "Accounts[?Id!='$MGMT'].Id" --output text); do
+  echo "啟用 $id ..."
+  aws account enable-region --account-id $id --region-name ap-east-2
+done
+```
+
+4. 查看狀態，等全部顯示 `ENABLED`（`ENABLING` 表示還在進行，過幾分鐘再查）：
+
+```bash
+for id in $(aws organizations list-accounts --query "Accounts[?Id!='$MGMT'].Id" --output text); do
+  echo "$id: $(aws account get-region-opt-status --account-id $id --region-name ap-east-2 --query RegionOptStatus --output text)"
+done
+```
+
+**CloudShell 使用提示**：
+
+- 貼上：Windows 用 `Ctrl + Shift + V` 或右鍵貼上；Mac 用 `Cmd + V`。
+- 手冊中的 `<帳號ID>` 這類寫法表示「換成實際的值」，**`< >` 不要打出來**。在終端機裡 `<` 代表從檔案讀取，會出現 `No such file or directory`。帳號 ID 是 12 位數字，不是使用者名稱。
+- 畫面停在 `(END)` 時按 `q` 回到提示字元。
+- 出現 `AccessDeniedException` 或提到 trusted access，表示第 1 步的受信任存取還沒啟用。
+
+### 1.4 人員登入改用 IAM Identity Center
 
 **目的**：建立每個人日常使用的登入帳號。一次登入就能切換到各環境帳號，權限依群組統一管理。做完之後就不用再登入 root。
 
@@ -185,7 +236,7 @@
 
 Identity Center 只能有一個**主要區域**，建立後**不能更改**，要換只能整個刪除重建。
 
-1. 管理帳號先完成第 4 項「啟用台北區域」，等狀態變成「已啟用」。
+1. 確認 1.3 已完成：管理帳號和 4 個環境帳號的台北區域都是「已啟用」。
 2. 主控台搜尋 **IAM Identity Center**，右上角區域切到 **亞太地區（台北）**。
    - 如果台北無法啟用 Identity Center，改選**東京**（ap-northeast-1）。這裡只存放人員的登入帳號，不影響系統放在台北。
 3. 按 **啟用**。啟用頁面會以 AWS Organizations 建立**組織執行個體**，這是正確的，可以管理組織內所有帳號。
@@ -302,6 +353,11 @@ Identity Center 只能有一個**主要區域**，建立後**不能更改**，�
 
 - 提交後 AWS 會在各帳號建立對應的角色，畫面顯示「正在佈建」，通常一兩分鐘完成。
 - 開發人員群組目前沒有成員也可以先指派，之後新人只要加進群組就自動有權限。
+- ⚠️ **指派一直卡在「進行中」**（超過 5 分鐘）：幾乎都是該成員帳號還沒啟用台北。
+  - 進行中的項目**無法選取或移除**，這是正常的。直接按 **關閉**，請求不會因此取消；視窗說的「遺失佇列」只指還沒送出的項目。
+  - 照 1.3 B 幫該帳號啟用台北，等狀態變成 `ENABLED`。之後卡住的指派會自動完成，或顯示失敗；失敗的話重新指派一次即可。
+  - 最後到 **多帳戶許可** → **許可集**，確認三個許可集都是 **已佈建**。
+- 許可集顯示 **未佈建**：表示還沒指派到任何帳號，不是錯誤，指派後就會變成已佈建。之後修改**已佈建**的許可集時，要按頁面上的 **更新帳戶**（佈建）才會套用到各帳號。
 
 #### H. 第一次登入
 
@@ -325,8 +381,9 @@ Identity Center 只能有一個**主要區域**，建立後**不能更改**，�
 - [ ] 成員帳號已啟用 Root access management
 - [ ] Identity Center 的主要區域是台北，執行個體為單一區域
 - [ ] 可以用 Identity Center 帳號從自訂網址登入各環境，登入時會要求 MFA
-- [ ] 入口網站顯示的帳號和權限符合 1.3 G 的對照表
-- [ ] 區域選單看得到「亞太地區（台北）」，並能切換過去
+- [ ] 入口網站顯示的帳號和權限符合 1.4 G 的對照表
+- [ ] 管理帳號和 4 個環境帳號的台北區域都是「已啟用」（`ENABLED`）
+- [ ] 三個許可集都是「已佈建」
 - [ ] 收到 Budgets 的測試通知
 
 ### 注意事項
@@ -1011,6 +1068,8 @@ Cognito 不接受萬用字元的 callback 網址，所以所有租戶共用一�
 | 陷阱 | 後果 | 對策（步驟） |
 | --- | --- | --- |
 | 台北區域沒有手動開啟 | 所有資源都建不起來 | 第 1 步 |
+| 成員帳號沒開台北就指派 Identity Center 許可集 | 指派一直卡在「進行中」，且無法移除 | 先完成 1.3，再做 1.4 G |
+| 在台北開 CloudShell | 顯示 Region Unsupported | 切到東京再開（1.3 B） |
 | 手動建的環境想直接轉成 IaC | 無法用 `cdk destroy` 刪除，重建演練做不了 | 手動練習放 sandbox 帳號（怎麼使用這份手冊） |
 | CloudFront、Cognito 自訂網域的憑證或 WAF 建在台北 | 設定畫面選不到 | 都要建在 us-east-1（第 2、11 步） |
 | 萬用憑證沒包含根網域 | `example.com` 出現憑證錯誤 | 申請時同時列出兩個名稱（第 2 步） |
