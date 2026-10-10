@@ -12,7 +12,7 @@ Veilway 的工作分成四個 session。**只修改自己負責的檔案**，其
 
 | Session | 角色 | 負責修改 |
 | --- | --- | --- |
-| **Veilway 討論** | 整體架構與決策 | `Veilway2.md`、`Veilway三階段執行計畫.md`、`Veilway簡化版執行計畫.md`、`Veilway架構圖v2.html`、`Veilway架構圖v2.pdf`、`CLAUDE.md`、`README.md` |
+| **Veilway 討論** | 整體架構與決策 | `Veilway2.md`、`Veilway三階段執行計畫.md`、`Veilway簡化版執行計畫.md`、`Veilway台灣VPS版執行計畫.md`、`Veilway架構圖v2.html`、`Veilway架構圖v2.pdf`、`CLAUDE.md`、`README.md` |
 | **第一階段** | 骨架 | `Veilway第一階段操作手冊.md` |
 | **第二階段** | 隱道 | `Veilway第二階段操作手冊.md` |
 | **第三階段** | 檔案與非同步 | `Veilway第三階段操作手冊.md` |
