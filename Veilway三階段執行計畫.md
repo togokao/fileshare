@@ -2,12 +2,15 @@
 
 架構說明見〈Veilway2.md〉。第一階段的操作步驟見〈Veilway第一階段操作手冊.md〉。
 
+**三階段的產出是「產品底座」**：一套可重複使用的多租戶 AI 應用底座（共用套件 + IaC 範本 + 範本 repo）。之後的各個產品（例如保險業務員 AI 平台、中原大學產學脈動平台）各自從底座獨立出去，擁有自己的程式碼、後台、資料庫與網址（見 Veilway2.md 第 11 節）。
+
 ## 原則
 
 - **每個階段結束時，系統都要能完整運作**，之後不必回頭搬資料或改網路。
 - **依賴先行**：網路、身分、資料庫是隱道的前提，放在第一階段。
 - **出口從第一天就鎖住**：網路設計一開始就假設「只有閘道能連到平台外的模型」。
 - **基礎設施全部用 IaC 管理**（CDK 或 Terraform），環境可以一鍵重建，也能複製出 staging 環境。
+- **底座要能被重複套用**：底座不寫產品專屬的邏輯；IaC 全面參數化；套件邊界從第一階段就切好。
 
 | 階段 | 主題 | 一句話目標 |
 | --- | --- | --- |
@@ -24,7 +27,8 @@
 | 類別 | 項目 |
 | --- | --- |
 | 網路 | VPC（公有、私有子網，跨 2 個可用區）、Security Group 規劃。私有子網預設不對外，需要時才開 VPC endpoint |
-| IaC 與 CI/CD | CDK 或 Terraform；前台與後端各自的部署流程；dev、staging 兩套環境 |
+| IaC 與 CI/CD | CDK 或 Terraform；前台與後端各自的部署流程；dev、staging 兩套環境。**IaC 寫成可參數化的元件**（產品名稱、網域、帳號、規格都是參數），作為日後 `Veilway.Infrastructure` 套件的基礎 |
+| 專案結構 | 依套件邊界建立 solution：`Veilway.MultiTenancy`（本階段）、`Veilway.Gateway`、`Veilway.Files`（後續階段）各自獨立專案；另有一個**最小範例產品**引用這些專案 |
 | 邊緣與前台 | CloudFront + WAF、S3 前台 SPA（OAC，bucket 不公開）；單一網域加**萬用憑證**（ACM），每個租戶一個子網域 |
 | 分流與後端 | ALB → ASP.NET Core（ECS Fargate，正式環境至少 2 個容器、跨可用區），健康檢查、記錄 log 的方式 |
 | 身分 | Cognito user pool；JWT 內帶 `tenant_id`；API 端驗證 token，並核對子網域對應的租戶與 token 一致 |
@@ -45,6 +49,7 @@ AI 相關功能、檔案上傳、非同步處理。
 - [ ] 登出後，舊 token 立即失效（ElastiCache Session）；超過限流門檻的請求回 429
 - [ ] 停掉一個容器或切換 RDS 可用區時，服務不中斷（正式環境）
 - [ ] 刪掉整個環境後，能用 IaC 重建出來
+- [ ] **只改參數**（產品名稱、網域、帳號）就能用同一份 IaC 建出另一套獨立環境
 - [ ] 日誌中沒有 token、密碼等敏感資訊
 
 ### 風險
@@ -64,7 +69,8 @@ AI 相關功能、檔案上傳、非同步處理。
 | 出口 | 建立 Claude Platform on AWS 的 PrivateLink VPC endpoint（台北區域）；endpoint 的 security group 和 endpoint policy 只允許閘道；呼叫權限只授權給閘道的 IAM role；設定 workspace ID |
 | 出口管控 | 應用子網的其他對外連線改走 egress proxy 或 Network Firewall，加網域 allowlist，**不放行任何 AI 服務的網域**（第一階段經 NAT 完整對外，是已知、暫時的狀態） |
 | 推論位置 | workspace 層級設定 `default_inference_geo`、`allowed_inference_geos`；回覆中的 `usage.inference_geo` 寫進 `AI_REQUEST_LOG` |
-| 閘道管線 | `IChatClient` + `DelegatingChatClient`：遮蔽 → 檢查點 → 送出 → 還原 → 計量 |
+| 閘道管線 | `IChatClient` + `DelegatingChatClient`：遮蔽 → 檢查點 → 送出 → 還原 → 計量；整個閘道寫在 `Veilway.Gateway` 專案中 |
+| 遮蔽設定化 | 個資類型、正規表示式、租戶字典、提示詞、檢查點政策都由**設定**提供，不寫死在程式中，讓不同產品各自設定 |
 | 遮蔽器 | 正規表示式 + 租戶字典（字典的管理介面和匯入功能）。NER 列為本階段後段項目 |
 | 檢查點 | 對照表原值比對、正規表示式重掃、字典比對；依 Veilway2.md 第 5 節處理，故障時 fail-closed |
 | 還原器 | 能容錯的代號比對；串流緩衝區 |
@@ -91,6 +97,7 @@ Tool calling、RAG、檔案上傳。
 - [ ] 測試集上，格式類個資的召回率達 99.9% 以上，字典類 100%
 - [ ] 檢查點故障時，請求會被拒絕，不會放行
 - [ ] 每個租戶的 token 用量能夠查詢；超過方案額度時會被擋下
+- [ ] 範例產品只透過 `Veilway.Gateway` 的公開介面使用閘道，底座程式中沒有任何產品專屬的邏輯
 - [ ] ElastiCache 中沒有對照表或任何真名（抽查）
 
 ### 風險
@@ -115,6 +122,7 @@ Tool calling、RAG、檔案上傳。
 | 文件問答 | 「針對這份文件提問」；大型文件切段處理 |
 | 影音處理 | Worker 處理影像與錄音：影像 OCR 後走文字流程，錄音先轉成文字再走文字流程。可依時程分批上線 |
 | 檔案生命週期 | S3 lifecycle 規則；刪除對話或租戶時，連同檔案和對照表一起清除 |
+| 套件化 | 上傳、SQS 工作框架、文件抽文字與遮蔽寫在 `Veilway.Files` 專案中 |
 
 ### 可選項目（依第一批租戶的需求決定）
 
@@ -133,6 +141,19 @@ Tool calling、RAG、檔案上傳。
 
 ---
 
+## 三階段之後：產品化
+
+三階段完成後，把底座整理成可供產品套用的形式，並用第一個產品驗證：
+
+| 步驟 | 內容 | 完成標準 |
+| --- | --- | --- |
+| 1. 發佈套件 | `Veilway.Gateway`、`Veilway.MultiTenancy`、`Veilway.Files`、`Veilway.Infrastructure` 發佈到私有套件庫，採語意化版本並附更新說明 | 外部 repo 可以用版本號引用 |
+| 2. 建立範本 repo | 從範例產品整理出 `veilway-product-template`：前台、後端、CDK、CI/CD 都已接好套件 | 用範本建立新 repo 後，只填參數就能部署 |
+| 3. 第一個產品套用 | 例如保險業務員 AI 平台：建立 repo 與 AWS 帳號、部署、開始開發業務功能 | 第一個產品通過第一、二階段的驗收清單 |
+| 4. 回饋修正 | 套用時發現底座不夠通用的地方，修正後發佈新版本 | 第二個產品套用時不需要修改底座 |
+
+---
+
 ## 跨階段持續項目
 
 | 項目 | 第一階段 | 第二階段 | 第三階段 |
@@ -142,6 +163,7 @@ Tool calling、RAG、檔案上傳。
 | 監控 | 基本告警 | 遮蔽與攔截的統計、模型延遲 | 佇列堆積、Worker 錯誤率 |
 | 成本 | 基礎設施預算告警 | 每個租戶的 token 計量與額度 | 儲存與處理量 |
 | 安全檢查 | 跨租戶存取測試 | 出口滲透測試 | 檔案權限測試 |
+| 底座通用性 | IaC 參數化、專案依套件邊界拆分 | 閘道與遮蔽設定化，範例產品只用公開介面 | 檔案套件化，準備發佈套件與範本 repo |
 
 ---
 
@@ -152,3 +174,5 @@ Tool calling、RAG、檔案上傳。
 3. ~~MVP 是否先用單台 EC2、單可用區 RDS 省成本~~ 已定案：dev 用 1 個 Fargate 容器、單可用區 RDS；正式環境依原圖：Fargate 至少 2 個容器、多可用區 RDS（見〈Veilway第一階段操作手冊.md〉第 0 步）
 4. 開通 Claude Platform on AWS：AWS Marketplace 訂閱、在台北區域建立 workspace，並決定預設 `inference_geo`（`global` 或 `us`）與是否申請 ZDR
 5. 第一批租戶要不要 RAG 或 tool calling；如果要，第三階段的可選項目要提前，嵌入模型也要提早選定
+6. 套件與 repo 的組織方式：套件庫放哪裡（例如 GitHub Packages）、底座 repo 與範本 repo 的名稱
+7. 第一個套用底座的產品是哪一個（影響底座需要優先支援的功能）
