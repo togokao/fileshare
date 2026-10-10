@@ -4,6 +4,8 @@
 
 **第一階段完成時能做到**：使用者從租戶子網域登入，前台呼叫 API，API 依租戶讀寫資料；整個環境可以用 IaC 重建。
 
+**別忘了 Veilway 是產品底座**（見 Veilway2.md 第 11 節）：這一階段做出來的程式和 IaC，之後要讓保險業務員 AI、中原大學產學脈動平台等產品**重複套用**。所以除了「做得出來」，還要做到「換個產品名稱和網域就能再建一套」。和底座有關的要求標示為 🧩。
+
 ---
 
 ## 怎麼使用這份手冊
@@ -12,6 +14,7 @@
 - **建議做法**：先在 dev 環境用主控台照手冊做一遍，弄懂每個設定的作用；接著在第 14 步把同樣的設定寫成 IaC，再用 IaC 建出 staging。之後一律只改 IaC，不再手動點主控台。
 - 主控台路徑寫成「服務 → 頁面 → 按鈕」。
 - 本手冊中的 `example.com` 請換成你們的網域，`<…>` 是要自行填入的值。
+- 🧩 **命名規則**：手冊中以 `veilway` 開頭的名稱（例如 `veilway-dev`、`veilway-data`、`veilway_app`）都是「**產品代號**」加上用途。底座本身的代號是 `veilway`；之後的產品換成自己的代號，例如 `insai-dev`、`insai_app`。在 IaC 中，產品代號一律是參數，不要寫死。
 - 標示 ⚠️ 的是容易出錯、事後很難改的地方。
 
 ### 名詞速查
@@ -42,6 +45,8 @@
 | 子網域命名規則 | 只允許小寫英數字和連字號；保留 `www`、`api`、`admin`、`app` 等名稱 | 子網域會成為租戶的識別，事後很難改 |
 | MVP 規格 | dev：單 AZ 的 RDS、1 個 Fargate 容器、1 個 NAT<br>prod：多 AZ、至少 2 個容器、每個 AZ 一個 NAT | 照原圖，正式環境是 Fargate 至少 2 個容器、多可用區 RDS |
 | 原始碼與 CI/CD | GitHub + GitHub Actions | 用 OIDC 連 AWS，不存放長期金鑰（第 13 步） |
+| 🧩 產品代號 | 底座用 `veilway`；產品各自取一個短代號（小寫英數字，例如 `insai`、`cycu-pulse`） | 所有資源名稱、帳號、log group 都以產品代號開頭，多個產品同時存在時才不會混淆 |
+| 🧩 專案結構 | 一個 solution，依套件邊界拆專案（見第 8 步） | 日後要把共用部分發佈成套件，邊界必須一開始就切好 |
 
 > ⚠️ **台北區域的服務可用性**：台北區域於 2025 年 6 月開放，Cognito 於 2026 年 3 月上線台北。開工前請到 AWS 的「各區域服務清單」確認本手冊用到的服務（ECS Fargate、Cognito、ElastiCache、RDS、WAF、ACM、ECR、Secrets Manager、VPC endpoint）都已在台北提供。
 
@@ -374,6 +379,31 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 - ⚠️ 前面經過 CloudFront 和 ALB，程式收到的 Host 和來源 IP 都可能被改寫。請在 CloudFront 用 **CloudFront Function** 把使用者的原始 Host 複製到自訂標頭（例如 `X-Tenant-Host`），程式從這個標頭解析租戶（見第 11 步）。
 - 租戶判斷**只信任 token 和這個標頭**，不要信任前台自己傳上來的 tenant_id 參數。
 
+### 🧩 程式要放在哪裡：依套件邊界拆專案
+
+上表的功能幾乎都是**每個產品都需要**的，所以不要寫在產品的 API 專案裡，而是寫在共用專案中：
+
+```
+Veilway.sln
+├─ src/
+│  ├─ Veilway.MultiTenancy/        ← 本階段：JWT 驗證設定、租戶解析、RLS 攔截器、
+│  │                                  登出、限流、健康檢查、日誌過濾、租戶共用資料表
+│  ├─ Veilway.Gateway/             ← 第二階段：隱道閘道（本階段先建空專案）
+│  ├─ Veilway.Files/               ← 第三階段：檔案與非同步（本階段先建空專案）
+│  └─ Veilway.Infrastructure/      ← CDK 元件（第 14 步）
+├─ samples/
+│  └─ SampleProduct/               ← 最小範例產品：Api、Web（SPA）、Cdk 三個專案
+│                                     只透過公開介面使用上面的共用專案
+└─ tests/
+```
+
+| 規則 | 說明 |
+| --- | --- |
+| 共用專案只提供擴充方法 | 例如產品的 `Program.cs` 只要寫 `builder.AddVeilwayMultiTenancy(config)`、`app.UseVeilwayMultiTenancy()` 就能啟用整套功能 |
+| 所有差異都是設定 | Cognito 網址、子網域規則、限流門檻、日誌過濾的關鍵字等，都從設定讀取 |
+| 共用專案不引用範例產品 | 相依方向只能是「產品 → 共用專案」，反過來就無法拆成套件 |
+| 共用資料表與產品資料表分開 | 租戶、使用者、角色等共用資料表的 migration 放在 `Veilway.MultiTenancy`；產品自己的資料表放在產品專案 |
+
 ---
 
 ## 第 9 步：ECR 與 ECS Fargate
@@ -530,6 +560,8 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 3. **前台流程**：測試 → 建置 → `s3 sync` → CloudFront invalidation
 4. **資料庫 migration**：作為部署中的一個步驟，用 `veilway_owner` 帳號執行，在新版程式上線前完成
 5. **環境保護**：在 GitHub 的 Environments 設定 prod 需要人工核准才能部署
+6. 🧩 **workflow 可重複使用**：把建置、部署的步驟寫成 GitHub 的 **reusable workflow**，產品代號、AWS 帳號、網域用輸入參數帶入。之後的產品直接呼叫同一份 workflow
+7. 🧩 **共用專案的檢查**：每次 CI 都要確認共用專案可以單獨建置與測試，不依賴範例產品（產品化時才能直接打包成 NuGet 套件）
 
 ### 注意事項
 
@@ -541,11 +573,32 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 
 ## 第 14 步：IaC 化與重建驗證
 
-**目的**：把第 2 到 13 步的設定寫成 CDK，確保環境可以一鍵重建。
+**目的**：把第 2 到 13 步的設定寫成 CDK，確保環境可以一鍵重建；🧩 而且寫成**可參數化的元件**，讓之後的每個產品都能套用同一份 IaC。
 
 ### 操作
 
-1. 建立 CDK（C#）專案，按層拆成幾個 stack：
+1. 🧩 **把 IaC 分成兩層**：
+
+| 層 | 放在哪裡 | 內容 |
+| --- | --- | --- |
+| 元件層（共用） | `src/Veilway.Infrastructure` | 每個 stack 寫成可重複使用的類別（construct／stack），所有名稱與規格都來自參數 |
+| 組裝層（每個產品一份） | `samples/SampleProduct/Cdk` | 只負責填入參數、把元件組起來。之後的產品也只寫這一層 |
+
+2. **參數清單**（定義成一個設定類別，例如 `VeilwayProductConfig`）：
+
+| 參數 | 例子 |
+| --- | --- |
+| 產品代號 | `veilway`、`insai` |
+| 環境 | `dev`、`staging`、`prod` |
+| AWS 帳號與區域 | `<account-id>`、`ap-east-2` |
+| 網域 | `example.com` |
+| AZ 數量、NAT 數量 | dev：2、1；prod：3、3 |
+| 容器數量與規格 | dev：1、0.5 vCPU；prod：2 以上 |
+| RDS 規格與 Multi-AZ | dev：小型、關閉；prod：依負載、開啟 |
+| 刪除保護與保留政策 | dev：關閉；prod：開啟、RETAIN |
+| 日誌保留天數 | dev：14 天；prod：依稽核規定 |
+
+3. 元件層依 AWS 資源分成幾個 stack：
 
 | Stack | 內容 | 區域 |
 | --- | --- | --- |
@@ -556,15 +609,18 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 | `AppStack` | ECR、ECS、ALB | 台北 |
 | `EdgeStack` | S3 前台、CloudFront、DNS | 台北（引用 us-east-1 的資源） |
 
-2. 環境差異（AZ 數量、容器數量、Multi-AZ、刪除保護）寫成設定，不要寫死在程式碼裡。
-3. 用 CDK 部署 staging，跑完第 15 步的驗收清單。
-4. **重建演練**：用 CDK 刪除 dev，再用 CDK 重建一次，確認可以完全重現。
+4. 環境差異與產品差異全部寫成參數，**元件層裡不能出現任何寫死的名稱、網域或帳號**。
+5. 用 CDK 部署 staging，跑完第 15 步的驗收清單。
+6. **重建演練**：用 CDK 刪除 dev，再用 CDK 重建一次，確認可以完全重現。
+7. 🧩 **套用演練**：用另一組參數（例如產品代號 `demo`、另一個網域、另一個 AWS 帳號）部署一套全新的環境，確認**不需要修改元件層**就能建起來，而且和原本的環境完全不互相影響。這就是之後開新產品時要做的事。
 
 ### 注意事項
 
 - ⚠️ 有狀態的資源（RDS、S3、KMS）在 CDK 中要設定 **RemovalPolicy.RETAIN**（prod）並開啟刪除保護，避免一次 `cdk destroy` 就把資料刪光。
 - 跨區域引用（台北的 stack 用到 us-east-1 的憑證）要開啟 CDK 的 `crossRegionReferences`。
 - 手動在主控台改過的設定，下次 CDK 部署時會被覆蓋。導入 IaC 後就不要再手動修改。
+- 🧩 S3 bucket 名稱在全球必須唯一，名稱要包含產品代號、環境和帳號 ID（例如 `<產品代號>-<env>-web-<account-id>`），否則第二個產品部署時會撞名失敗。
+- 🧩 只能在 us-east-1 建立的資源（CloudFront 憑證、WAF）也要依產品代號命名，因為多個產品的這些資源會集中在 us-east-1。
 
 ---
 
@@ -583,6 +639,8 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 | 7 | 停掉一個容器或切換 RDS 可用區，服務不中斷（prod／staging） | 手動停止一個 task；對 RDS 執行 **Reboot with failover** |
 | 8 | 環境可以用 IaC 重建 | 第 14 步的重建演練 |
 | 9 | 日誌中沒有 token、密碼等敏感資訊 | Logs Insights 搜尋 `Bearer`、`password`、`eyJ` 等關鍵字 |
+| 10 | 🧩 只改參數就能建出另一套獨立環境 | 第 14 步的套用演練 |
+| 11 | 🧩 共用專案不依賴範例產品，可以單獨建置與測試 | CI 中單獨建置 `src/` 下的專案；檢查共用專案沒有引用 `samples/` |
 
 ---
 
@@ -601,6 +659,9 @@ SELECT set_config('app.tenant_id', '<tenant_id>', true);  -- 第三個參數 tru
 | 映像架構與 task definition 不一致 | 容器一直啟動失敗 | 統一用 ARM64（第 9 步） |
 | GitHub 存放 AWS 長期金鑰 | 金鑰外洩風險 | 改用 OIDC（第 13 步） |
 | 日誌沒設保留天數 | 費用持續累積 | 每個 log group 都設定（第 12 步） |
+| 🧩 IaC 裡寫死名稱、網域或帳號 | 第二個產品無法套用，只能整份複製再改 | 全部改成參數，並做套用演練（第 14 步） |
+| 🧩 共用功能寫在產品的 API 專案裡 | 之後拆不出套件，每個產品各寫一份 | 依套件邊界拆專案（第 8 步） |
+| 🧩 S3 bucket 名稱沒有包含產品代號與帳號 | 第二個產品部署時撞名 | 依命名規則（第 14 步） |
 
 ## 附錄 B：費用注意
 
